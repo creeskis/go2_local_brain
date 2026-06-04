@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 
 from .brain.local_llm import LocalRobotBrain
@@ -11,11 +12,31 @@ from .config import load_config
 from .driver.webrtc_client import Go2Config, Go2WebRTCClient
 
 
-async def _amain() -> int:
+def _configure_logging() -> None:
+    """Keep robot-brain logs visible without flooding the REPL.
+
+    unitree_webrtc_connect logs every incoming sport-state packet via the
+    root logger at INFO. That is useful while debugging WebRTC, but it makes
+    the prompt nearly unusable once telemetry starts streaming. By default we
+    keep third-party/root logs at WARNING and our package logs at INFO.
+    Set VERBOSE_WEBRTC_LOGS=1 to restore full upstream INFO logging.
+    """
+    verbose = os.getenv("VERBOSE_WEBRTC_LOGS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    root_level = logging.INFO if verbose else logging.WARNING
     logging.basicConfig(
-        level=logging.INFO,
+        level=root_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger("go2_local_brain").setLevel(logging.INFO)
+
+
+async def _amain() -> int:
+    _configure_logging()
 
     cfg = load_config()
     client = Go2WebRTCClient(
