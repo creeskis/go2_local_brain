@@ -19,8 +19,10 @@ from .viewer import _jpeg_from_frame, _lidar_payload_from_message
 log = logging.getLogger(__name__)
 
 _LIDAR_SWITCH_TOPIC = "rt/utlidar/switch"
+_LIDAR_TOPIC = "rt/utlidar/voxel_map"
 _LIDAR_ARRAY_TOPIC = "rt/utlidar/voxel_map_compressed"
-_MAX_LIDAR_POINTS = 6000
+_MAX_LIDAR_POINTS = 1200
+_LIDAR_SEND_PERIOD_S = 0.25
 
 
 class UnifiedGui:
@@ -38,7 +40,12 @@ class UnifiedGui:
         self._latest_video_ts = 0.0
         self._latest_lidar: dict[str, Any] | None = None
         self._video_frames = 0
+        self._lidar_raw_messages = 0
         self._lidar_messages = 0
+        self._lidar_parse_errors = 0
+        self._lidar_dropped = 0
+        self._last_lidar_send_ts = 0.0
+        self._last_lidar_error = ""
         self._status = "starting"
         self._last_result = ""
 
@@ -120,6 +127,7 @@ class UnifiedGui:
             pubsub = getattr(datachannel, "pub_sub", None)
             if pubsub is not None:
                 pubsub.publish_without_callback(_LIDAR_SWITCH_TOPIC, "on")
+                pubsub.subscribe(_LIDAR_TOPIC, self._on_lidar_message)
                 pubsub.subscribe(_LIDAR_ARRAY_TOPIC, self._on_lidar_message)
 
         video = getattr(conn, "video", None)
@@ -128,12 +136,26 @@ class UnifiedGui:
             video.add_track_callback(self._recv_video_track)
 
     def _on_lidar_message(self, message: Any) -> None:
+        self._lidar_raw_messages += 1
         payload = _lidar_payload_from_message(message, max_points=_MAX_LIDAR_POINTS)
-        if payload is None or self._loop is None:
+        if payload is None:
+            self._lidar_parse_errors += 1
+            if self._lidar_parse_errors <= 5:
+                self._last_lidar_error = _summarize_lidar_message(message)
+                log.warning("could not parse lidar message shape: %s", self._last_lidar_error)
+            if self._loop is not None:
+                self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._broadcast_status()))
+            return
+        if self._loop is None:
             return
         self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._set_lidar(payload)))
 
     async def _set_lidar(self, payload: dict[str, Any]) -> None:
+        now = time.monotonic()
+        if now - self._last_lidar_send_ts < _LIDAR_SEND_PERIOD_S:
+            self._lidar_dropped += 1
+            return
+        self._last_lidar_send_ts = now
         self._latest_lidar = payload
         self._lidar_messages += 1
         await self._broadcast_json({"type": "lidar", **payload})
@@ -278,7 +300,11 @@ class UnifiedGui:
         return {
             "status": self._status,
             "video_frames": self._video_frames,
+            "lidar_raw_messages": self._lidar_raw_messages,
             "lidar_messages": self._lidar_messages,
+            "lidar_parse_errors": self._lidar_parse_errors,
+            "lidar_dropped": self._lidar_dropped,
+            "last_lidar_error": self._last_lidar_error,
             "last_result": self._last_result,
         }
 
@@ -289,6 +315,19 @@ async def _json_or_empty(request: web.Request) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _summarize_lidar_message(message: Any) -> str:
+    if not isinstance(message, dict):
+        return type(message).__name__
+    data = message.get("data")
+    if not isinstance(data, dict):
+        return f"data={type(data).__name__}"
+    nested = data.get("data")
+    keys = sorted(str(k) for k in data.keys())
+    if isinstance(nested, dict):
+        return f"data_keys={keys}; nested_keys={sorted(str(k) for k in nested.keys())}"
+    return f"data_keys={keys}; nested={type(nested).__name__}"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -376,7 +415,7 @@ _INDEX_HTML = """<!doctype html>
     </aside>
     <section class="media">
       <div class="videoWrap"><img id="video" src="/video.mjpg" alt="Live robot video"></div>
-      <div id="lidarPanel"><canvas id="lidarCanvas"></canvas><div id="hud">LiDAR: <span id="lidarCount">0</span></div></div>
+      <div id="lidarPanel"><canvas id="lidarCanvas"></canvas><div id="hud">LiDAR: <span id="lidarCount">0</span><br><span id="lidarDebug">waiting</span></div></div>
     </section>
   </main>
   <script>
@@ -442,7 +481,9 @@ _INDEX_HTML = """<!doctype html>
       const msg = JSON.parse(ev.data);
       if (msg.type === "status") {
         document.getElementById("status").textContent = `${msg.status} video=${msg.video_frames} lidar=${msg.lidar_messages}`;
+        document.getElementById("lidarDebug").textContent = `raw=${msg.lidar_raw_messages} rendered=${msg.lidar_messages} parseErrors=${msg.lidar_parse_errors} dropped=${msg.lidar_dropped}`;
         if (msg.last_result) document.getElementById("result").textContent = msg.last_result;
+        if (msg.last_lidar_error) document.getElementById("result").textContent = `LiDAR parse shape: ${msg.last_lidar_error}`;
       }
       if (msg.type === "lidar") {
         document.getElementById("lidarCount").textContent = `${msg.point_count} / ${msg.source_point_count}`;

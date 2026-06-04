@@ -20,6 +20,13 @@ class LidarPayloadTests(unittest.TestCase):
         self.assertEqual(payload["point_count"], 2)
         self.assertEqual(payload["source_point_count"], 2)
 
+    def test_lidar_payload_accepts_direct_positions_shape(self) -> None:
+        message = {"data": {"stamp": 123, "positions": [1, 2, 3]}}
+        payload = _lidar_payload_from_message(message, max_points=10)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["points"], [[1.0, 2.0, 3.0]])
+
     def test_decimate_caps_point_count(self) -> None:
         points = [[float(i), 0.0, 0.0] for i in range(10)]
         self.assertEqual(len(_decimate(points, 4)), 4)

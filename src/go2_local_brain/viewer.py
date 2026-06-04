@@ -18,8 +18,9 @@ from .config import load_config
 log = logging.getLogger(__name__)
 
 _LIDAR_SWITCH_TOPIC = "rt/utlidar/switch"
+_LIDAR_TOPIC = "rt/utlidar/voxel_map"
 _LIDAR_ARRAY_TOPIC = "rt/utlidar/voxel_map_compressed"
-_MAX_LIDAR_POINTS = 6000
+_MAX_LIDAR_POINTS = 1200
 _JPEG_QUALITY = 75
 
 
@@ -120,6 +121,7 @@ class Go2BrowserViewer:
         if pubsub is None:
             raise RuntimeError("WebRTC data channel pub/sub interface not found")
         pubsub.publish_without_callback(_LIDAR_SWITCH_TOPIC, "on")
+        pubsub.subscribe(_LIDAR_TOPIC, self._on_lidar_message)
         pubsub.subscribe(_LIDAR_ARRAY_TOPIC, self._on_lidar_message)
         log.info("lidar stream subscribed")
 
@@ -232,12 +234,7 @@ def _jpeg_from_frame(frame: Any) -> bytes:
 
 
 def _lidar_payload_from_message(message: Any, *, max_points: int = _MAX_LIDAR_POINTS) -> dict[str, Any] | None:
-    try:
-        data = message.get("data", {}) if isinstance(message, dict) else {}
-        inner = data.get("data", {}) if isinstance(data, dict) else {}
-        positions = inner.get("positions", [])
-    except Exception:  # noqa: BLE001
-        return None
+    data, positions = _extract_lidar_positions(message)
     if not isinstance(positions, list) or len(positions) < 3:
         return None
 
@@ -253,6 +250,22 @@ def _lidar_payload_from_message(message: Any, *, max_points: int = _MAX_LIDAR_PO
         "source_point_count": len(positions) // 3,
         "stamp": data.get("stamp") if isinstance(data, dict) else None,
     }
+
+
+def _extract_lidar_positions(message: Any) -> tuple[dict[str, Any], Any]:
+    """Return decoded LiDAR metadata and flat xyz positions from known upstream shapes."""
+    if not isinstance(message, dict):
+        return {}, None
+    data = message.get("data", {})
+    if not isinstance(data, dict):
+        return {}, None
+
+    nested = data.get("data")
+    if isinstance(nested, dict) and "positions" in nested:
+        return data, nested.get("positions")
+    if "positions" in data:
+        return data, data.get("positions")
+    return data, None
 
 
 def _xyz_triplets(values: list[Any]) -> list[list[float]]:

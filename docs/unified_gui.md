@@ -54,3 +54,17 @@ stand on your hind legs
 make up a dance
 explore in relaxed mode for 10 seconds
 ```
+
+## LiDAR Troubleshooting
+
+The LiDAR HUD shows:
+
+```text
+raw=<callbacks> rendered=<clouds> parseErrors=<bad-shape> dropped=<throttled>
+```
+
+- `raw=0`: the robot is not publishing on either LiDAR topic, or LiDAR did not switch on.
+- `raw>0` and `parseErrors>0`: the decoded message shape is different than expected; check the latest GUI log line for `LiDAR parse shape`.
+- `raw>0` and `rendered>0`: the backend is receiving point clouds; if the pane is visually blank, use the mouse wheel / drag in the LiDAR panel to reframe the Three.js camera.
+
+The GUI subscribes to both `rt/utlidar/voxel_map` and `rt/utlidar/voxel_map_compressed` and down-samples point clouds before sending them to the browser.
