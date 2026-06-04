@@ -7,6 +7,8 @@ import asyncio
 import io
 import json
 import logging
+import math
+import struct
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -235,20 +237,17 @@ def _jpeg_from_frame(frame: Any) -> bytes:
 
 def _lidar_payload_from_message(message: Any, *, max_points: int = _MAX_LIDAR_POINTS) -> dict[str, Any] | None:
     data, positions = _extract_lidar_positions(message)
-    values = _coerce_position_values(positions)
-    if values is None or len(values) < 3:
-        return None
-
-    points = _xyz_triplets(values)
+    points, source_point_count = _points_from_positions(positions)
     if not points:
         return None
+    points = _orient_points_for_three(points)
     points = _decimate(points, max_points)
     distances = [(x * x + y * y + z * z) ** 0.5 for x, y, z in points]
     return {
         "points": points,
         "distances": distances,
         "point_count": len(points),
-        "source_point_count": len(values) // 3,
+        "source_point_count": source_point_count,
         "stamp": data.get("stamp") if isinstance(data, dict) else None,
     }
 
@@ -289,6 +288,48 @@ def _coerce_position_values(positions: Any) -> list[Any] | None:
         return list(positions)
     except TypeError:
         return None
+
+
+def _points_from_positions(positions: Any) -> tuple[list[list[float]], int]:
+    values = _coerce_position_values(positions)
+    if values is None or len(values) < 3:
+        return [], 0
+    if _looks_like_float32_byte_buffer(values):
+        points = _float32_triplets_from_byte_values(values)
+        return points, len(points)
+    points = _xyz_triplets(values)
+    return points, len(values) // 3
+
+
+def _looks_like_float32_byte_buffer(values: list[Any]) -> bool:
+    if len(values) < 12 or len(values) % 12 != 0:
+        return False
+    sample = values[: min(len(values), 96)]
+    return all(isinstance(v, int) and 0 <= v <= 255 for v in sample)
+
+
+def _float32_triplets_from_byte_values(values: list[Any]) -> list[list[float]]:
+    try:
+        blob = bytes(int(v) & 0xFF for v in values)
+    except (TypeError, ValueError):
+        return []
+    usable_len = len(blob) - (len(blob) % 12)
+    points: list[list[float]] = []
+    for x, y, z in struct.iter_unpack("<fff", blob[:usable_len]):
+        if all(math.isfinite(v) for v in (x, y, z)):
+            points.append([float(x), float(y), float(z)])
+    return points
+
+
+def _orient_points_for_three(points: list[list[float]]) -> list[list[float]]:
+    """Map robot xyz into Three.js coordinates and place the cloud on the grid."""
+    if not points:
+        return []
+    oriented = [[-x, z, y] for x, y, z in points]
+    center_x = sum(p[0] for p in oriented) / len(oriented)
+    center_z = sum(p[2] for p in oriented) / len(oriented)
+    min_y = min(p[1] for p in oriented)
+    return [[x - center_x, y - min_y, z - center_z] for x, y, z in oriented]
 
 
 def _xyz_triplets(values: list[Any]) -> list[list[float]]:
