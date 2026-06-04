@@ -125,6 +125,14 @@ class MovementFeatureTests(unittest.TestCase):
         self.assertGreaterEqual(client.move.await_count, 1)
         client.stop.assert_awaited()
 
+    def test_sequence_accepts_model_generated_aliases(self) -> None:
+        client = _make_client_with_fake(_FakePubSub())
+        client.move = AsyncMock()  # type: ignore[method-assign]
+        client.stop = AsyncMock()  # type: ignore[method-assign]
+        asyncio.run(client.sequence([{"cmd": "robotstep_forward"}, {"cmd": "robot_turn_right_90"}]))
+        self.assertEqual(client.move.await_count, 2)
+        client.stop.assert_awaited()
+
 
 class AdvancedActionTests(unittest.TestCase):
     def test_dance_uses_first_available_candidate(self) -> None:
