@@ -1,12 +1,16 @@
 # go2_local_brain
 
-A small, single-process Python brain for a **Unitree Go2 Air** that runs local natural-language commands through **Ollama tool calling** and drives the robot over **WebRTC** using `unitree_webrtc_connect`.
+A small, single-process Python brain for a **Unitree Go2 Air**. It turns typed natural-language commands into one safe robot tool call at a time using **Ollama**, then sends bounded motion commands over **WebRTC** through `unitree_webrtc_connect`.
 
-This README is the operating guide for the project: how to clone it, run it on a WSL instance, run it on a Jetson Orin Nano, configure the Go2 Air network settings, choose an Ollama model, upgrade the code, and safely change the motion limits.
+This README is split into two parts:
 
-## Current Target Setup
+1. Installation guide for a **WSL instance**.
+2. Installation guide for the **Jetson Orin Nano**.
+3. Reference sections explaining how the app works, what to change, and how to troubleshoot it.
 
-Known target details from this project:
+Keep this repo private. It contains operational details about a real robot setup.
+
+## Known Target Setup
 
 - Robot: Unitree Go2 Air
 - Firmware: `1.1.7`
@@ -18,36 +22,438 @@ Known target details from this project:
 - Jetson OS target: JetPack `6.2.1`
 - Production Ollama location: local on the Jetson Orin
 - Production model: `qwen3:1.7b`
-- AES key: optional/blank for this firmware unless WebRTC auth later proves otherwise
+- AES key: optional/blank for firmware `1.1.7` unless WebRTC auth later proves otherwise
 
-The important thing: `GO2_IP` should point at the dog, not the Jetson. For this setup that means:
+The most important config rule:
 
 ```env
 GO2_IP=192.168.123.121
 ```
 
-## What This App Does
+`GO2_IP` points at the dog, not the Jetson.
 
-The app is intentionally small:
+# Installation Guide 1: WSL Instance
 
-1. Connect to the Go2 Air over local-network WebRTC.
-2. Start a REPL prompt.
-3. Send each typed prompt to Ollama with a strict tool schema.
-4. Execute exactly one robot tool call.
-5. Enforce safety in Python regardless of what the model returns.
+Use this guide to run and test the project from a WSL instance before deploying it to the Jetson.
 
-The available tools are:
+## 1. Configure WSL Networking
+
+Recommended Windows `%USERPROFILE%\.wslconfig`:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+memory=24GB
+processors=8
+```
+
+After changing `.wslconfig`, restart WSL from PowerShell:
+
+```powershell
+wsl --shutdown
+```
+
+Reopen the WSL instance.
+
+## 2. Confirm Network Reachability
+
+From the WSL instance:
+
+```bash
+ping -c 3 192.168.123.121
+ping -c 3 192.168.123.18
+```
+
+Expected:
+
+- `192.168.123.121` responds: the dog is reachable.
+- `192.168.123.18` responds: the Jetson is reachable.
+
+If `192.168.123.121` does not respond, fix networking before continuing.
+
+## 3. Install System Packages
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git curl portaudio19-dev
+```
+
+`portaudio19-dev` is needed because `unitree_webrtc_connect` pulls in `pyaudio`, which often builds from source on Linux.
+
+## 4. Clone The Repo
+
+```bash
+cd ~
+mkdir -p robotics
+cd robotics
+git clone https://github.com/creeskis/go2_local_brain.git
+cd go2_local_brain
+```
+
+If GitHub asks for credentials over HTTPS, use your GitHub username and a GitHub personal access token.
+
+## 5. Create The Python Environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .
+```
+
+## 6. Configure `.env`
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Use this for WSL-local Ollama testing:
+
+```env
+GO2_IP=192.168.123.121
+GO2_AES_128_KEY=
+OLLAMA_MODEL=qwen3:1.7b
+# OLLAMA_HOST=
+# FORCE_MOTION_MODE=
+```
+
+If the Python app runs in WSL but Ollama runs somewhere else, set `OLLAMA_HOST`:
+
+```env
+OLLAMA_HOST=http://<ollama-host-ip>:11434
+```
+
+If Ollama also runs inside this same WSL instance, leave `OLLAMA_HOST` unset.
+
+## 7. Install Ollama In The WSL Instance
+
+Skip this section if Ollama already runs somewhere else and you plan to use `OLLAMA_HOST`.
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+Start or verify Ollama:
+
+```bash
+ollama --version
+ollama list
+curl http://localhost:11434/api/tags
+```
+
+Pull the default model:
+
+```bash
+ollama pull qwen3:1.7b
+ollama list
+```
+
+## 8. Run Tests
+
+```bash
+cd ~/robotics/go2_local_brain
+source .venv/bin/activate
+python scripts/smoke_test_imports.py
+python -m unittest discover -s tests
+```
+
+A clean run should end with:
+
+```text
+OK
+```
+
+## 9. Run The App From WSL
+
+Only run this when you are ready for the app to connect to the dog:
+
+```bash
+cd ~/robotics/go2_local_brain
+source .venv/bin/activate
+python -m go2_local_brain.main
+```
+
+The prompt should appear:
+
+```text
+Go2 local brain ready. Type a command, or 'quit' to exit.
+go2>
+```
+
+First commands to try:
+
+```text
+stop
+stand up
+sit down
+```
+
+Only after stationary commands look good, test tiny movement in a clear area:
+
+```text
+move forward a tiny bit
+turn left slowly
+stop
+```
+
+## 10. If Commands Are Ignored
+
+If WebRTC connects but sport commands appear to do nothing, edit `.env`:
+
+```bash
+nano .env
+```
+
+Set:
+
+```env
+FORCE_MOTION_MODE=normal
+```
+
+Then rerun:
+
+```bash
+source .venv/bin/activate
+python -m go2_local_brain.main
+```
+
+# Installation Guide 2: Jetson Orin Nano
+
+Use this guide for the final Jetson Orin Nano deployment. The intended production setup is app + Ollama both running locally on the Jetson.
+
+## 1. Confirm Jetson Basics
+
+On the Jetson:
+
+```bash
+python3 --version
+uname -a
+cat /etc/os-release
+```
+
+JetPack `6.2.1` is Ubuntu 22.04 based and commonly has Python 3.10. This project supports Python `>=3.10`, so the default Python should be fine.
+
+## 2. Confirm Network Reachability
+
+From the Jetson:
+
+```bash
+ping -c 3 192.168.123.121
+ping -c 3 192.168.123.161
+```
+
+Expected:
+
+- `192.168.123.121` responds: this is the dog STA/control IP.
+- `192.168.123.161` may also respond, but do not use it as the default `GO2_IP` unless testing proves otherwise.
+
+## 3. Install System Packages
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git curl portaudio19-dev
+```
+
+## 4. Clone The Repo
+
+```bash
+cd ~
+mkdir -p robotics
+cd robotics
+git clone https://github.com/creeskis/go2_local_brain.git
+cd go2_local_brain
+```
+
+## 5. Create The Python Environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .
+```
+
+## 6. Configure `.env`
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Use this Jetson target config:
+
+```env
+GO2_IP=192.168.123.121
+GO2_AES_128_KEY=
+OLLAMA_MODEL=qwen3:1.7b
+# OLLAMA_HOST=
+# FORCE_MOTION_MODE=
+```
+
+Leave `OLLAMA_HOST` unset because Ollama is intended to run locally on the Jetson.
+
+## 7. Install Ollama On Jetson
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+Verify Ollama:
+
+```bash
+ollama --version
+ollama list
+curl http://localhost:11434/api/tags
+```
+
+Pull the Jetson default model:
+
+```bash
+ollama pull qwen3:1.7b
+ollama list
+```
+
+## 8. Run Tests On Jetson
+
+```bash
+cd ~/robotics/go2_local_brain
+source .venv/bin/activate
+python scripts/smoke_test_imports.py
+python -m unittest discover -s tests
+```
+
+A clean run should end with:
+
+```text
+OK
+```
+
+## 9. Run The App On Jetson
+
+Only run this when you are ready for the app to connect to the dog:
+
+```bash
+cd ~/robotics/go2_local_brain
+source .venv/bin/activate
+python -m go2_local_brain.main
+```
+
+First commands:
+
+```text
+stop
+stand up
+sit down
+```
+
+Then, in a clear area:
+
+```text
+move forward a tiny bit
+turn left slowly
+stop
+```
+
+## 10. Optional Motion Mode Diagnostic
+
+If the app connects but movement is ignored, edit `.env`:
+
+```bash
+nano .env
+```
+
+Set:
+
+```env
+FORCE_MOTION_MODE=normal
+```
+
+Rerun:
+
+```bash
+source .venv/bin/activate
+python -m go2_local_brain.main
+```
+
+The driver will query the robot's motion mode, switch to `normal` if needed, and wait about 5 seconds before accepting commands.
+
+# Reference: How The App Works
+
+## Architecture
+
+The app is intentionally one process:
+
+```text
+User prompt
+  -> LocalRobotBrain
+  -> Ollama chat with tool schemas
+  -> exactly one robot tool call
+  -> Go2WebRTCClient
+  -> unitree_webrtc_connect WebRTC data channel
+  -> Go2 Air
+```
+
+Important files:
+
+```text
+src/go2_local_brain/main.py                    Entry point and REPL wiring
+src/go2_local_brain/config.py                  .env/environment loader
+src/go2_local_brain/brain/local_llm.py          Ollama tool-calling brain
+src/go2_local_brain/driver/webrtc_client.py     Unitree WebRTC driver wrapper
+src/go2_local_brain/safety/limits.py            Motion caps and deadman timeout
+src/go2_local_brain/viz/rerun_logger.py         Placeholder Rerun logger
+scripts/smoke_test_imports.py                   Import/package smoke test
+tests/test_brain.py                             Brain tests
+tests/test_driver.py                            Driver tests
+```
+
+## Brain Layer
+
+`LocalRobotBrain` sends every prompt to Ollama with a compact system prompt and four tool schemas:
 
 - `robot_stand_up`
 - `robot_sit_down`
 - `robot_stop`
-- `robot_move(vx, vy=0, vyaw=0, duration_s=0.35)`
+- `robot_move`
 
-The robot driver enforces conservative velocity caps, finite-number validation, a hard duration cap, a deadman loop, and stop-on-error behavior. The model is treated as a command chooser, not a trusted safety system.
+It deliberately executes only the first tool call. Multi-step plans are out of scope for this small local brain. The operator can issue another prompt for the next action.
 
-## Safety Defaults
+If Ollama fails, returns no tool call, returns an unknown tool, or returns bad arguments, the brain calls `stop()`.
 
-The limits live in `src/go2_local_brain/safety/limits.py`:
+## Driver Layer
+
+`Go2WebRTCClient` wraps `unitree_webrtc_connect`.
+
+The app uses the 2.x API shape:
+
+```python
+conn.datachannel.pub_sub
+```
+
+There is no `SportClient` in this package version.
+
+Sport requests are sent to:
+
+```python
+RTC_TOPIC["SPORT_MOD"]
+```
+
+The confirmed `Move` payload is:
+
+```json
+{"x": 0.2, "y": 0.0, "z": 0.0}
+```
+
+Meaning:
+
+- `x`: forward velocity in m/s
+- `y`: lateral velocity in m/s, positive left
+- `z`: yaw rate in rad/s, positive counter-clockwise
+
+## Safety Layer
+
+Limits live in `src/go2_local_brain/safety/limits.py`:
 
 ```python
 MAX_VX = 0.35
@@ -58,294 +464,25 @@ MAX_MOVE_DURATION_S = 1.0
 DEADMAN_TIMEOUT_S = 0.75
 ```
 
-These are deliberately small. Do not raise them until the robot has been tested in a clear area with a human ready to intervene.
+The driver clamps velocities. The brain rejects non-finite values and caps duration before the command reaches the driver.
 
-Important behavior:
+Do not rely on the model for safety. The model proposes; the driver enforces.
 
-- `robot_stand_up` sends `StandUp`, waits briefly, then sends `BalanceStand`.
-- `robot_move` publishes `Move` at about 20 Hz, then sends `StopMove` at the end.
-- If the LLM returns no tool call, an unknown tool, bad arguments, NaN, infinity, or any failed tool call, the brain calls `stop()`.
-- If no fresh command arrives within the deadman timeout, the driver sends zero velocity.
-- The app subscribes to passive sport-state telemetry, but does not yet block movement based on telemetry because the exact firmware schema still needs real hardware confirmation.
+## StandUp And BalanceStand
 
-## Repository
+Firmware exposes a locked stand posture and a balance stand mode. Upstream MCF examples warn that after `StandUp`, joints may be locked until `BalanceStand` is called.
 
-Private GitHub repo:
+So `robot_stand_up` does:
 
 ```text
-https://github.com/creeskis/go2_local_brain
+StandUp -> wait 2.5s -> BalanceStand
 ```
 
-Keep it private. The code does not contain a secret key, but the docs and config describe real robot network details, firmware version, a jailbroken robot, and deployment assumptions. That information should not be public by default.
+This is why a single `stand up` prompt should leave the dog ready to accept normal `Move` commands.
 
-## Clone Onto A WSL Instance
+## Motion Mode
 
-Use this path when testing from a WSL instance before moving to the Jetson.
-
-```bash
-cd ~
-mkdir -p robotics
-cd robotics
-git clone https://github.com/creeskis/go2_local_brain.git
-cd go2_local_brain
-```
-
-If HTTPS asks for credentials, use your GitHub username and a GitHub personal access token. GitHub no longer accepts normal account passwords for git HTTPS pushes/clones in many flows.
-
-## WSL Instance Network Notes
-
-This app can run from a WSL instance if the WSL instance can reach the Go2 Air subnet.
-
-Recommended `.wslconfig`:
-
-```ini
-[wsl2]
-networkingMode=mirrored
-memory=24GB
-processors=8
-```
-
-With mirrored networking, the WSL instance usually shares the Windows host network interfaces directly, which makes the `192.168.123.x` robot subnet reachable.
-
-Check reachability from WSL:
-
-```bash
-ping 192.168.123.121
-ping 192.168.123.18
-```
-
-If the robot cannot be reached from WSL:
-
-- Confirm mirrored networking is enabled.
-- Restart WSL after changing `.wslconfig`:
-
-```powershell
-wsl --shutdown
-```
-
-Then reopen the WSL instance.
-
-The project assumes outbound WebRTC traffic is allowed. DimensionOS already working through the same WSL network path is a good sign that WebRTC routing is basically correct.
-
-## Install On A WSL Instance
-
-From the cloned repo:
-
-```bash
-cd ~/robotics/go2_local_brain
-bash bootstrap.sh
-```
-
-That script installs apt prerequisites, creates `.venv`, installs the package in editable mode, creates `.env` from `.env.example`, and runs the import smoke test.
-
-Manual install:
-
-```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip git portaudio19-dev
-
-cd ~/robotics/go2_local_brain
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -e .
-cp .env.example .env
-python scripts/smoke_test_imports.py
-python -m unittest discover -s tests
-```
-
-## Configure `.env`
-
-The normal target config is:
-
-```env
-GO2_IP=192.168.123.121
-GO2_AES_128_KEY=
-OLLAMA_MODEL=qwen3:1.7b
-# OLLAMA_HOST=
-# FORCE_MOTION_MODE=
-```
-
-Meaning:
-
-- `GO2_IP`: the dog control endpoint. For this Go2 Air in STA mode, use `192.168.123.121`.
-- `GO2_AES_128_KEY`: leave blank for firmware `1.1.7` unless WebRTC auth fails and a key is retrieved later.
-- `OLLAMA_MODEL`: use `qwen3:1.7b` for Jetson Orin Nano compatibility.
-- `OLLAMA_HOST`: only set when the Python app and Ollama server are in different environments.
-- `FORCE_MOTION_MODE`: leave blank unless commands connect but appear to be ignored.
-
-## Ollama Host Rules
-
-`OLLAMA_HOST` tells the Python Ollama client where the Ollama server is.
-
-Leave `OLLAMA_HOST` unset when:
-
-- The app runs on the Jetson and Ollama also runs on the Jetson.
-- The app runs in a WSL instance and Ollama also runs in that same WSL instance.
-
-Set `OLLAMA_HOST` when the app and Ollama are separated:
-
-```bash
-export OLLAMA_HOST=http://<ollama-machine-ip>:11434
-```
-
-Examples:
-
-```bash
-# App in WSL, Ollama on the Windows host:
-export OLLAMA_HOST=http://<windows-host-ip>:11434
-
-# App on Jetson, Ollama on another machine:
-export OLLAMA_HOST=http://<other-machine-ip>:11434
-```
-
-For the final Jetson setup, leave it unset.
-
-## Ollama Model Choice
-
-Default:
-
-```env
-OLLAMA_MODEL=qwen3:1.7b
-```
-
-Why `qwen3:1.7b`:
-
-- It should run acceptably on Jetson Orin Nano.
-- The brain only needs one simple bounded tool call per prompt.
-- Safety is enforced by the driver, not the model.
-
-Bigger optional models for an offboard planner:
-
-- `qwen3:8b`: DimensionOS uses this for its Go2 Ollama agentic blueprint.
-- `lfm2.5:8b`: stronger local tool-calling candidate, but heavier.
-- `gpt-oss:20b`: larger planning model, probably too heavy for live Jetson use.
-
-A good architecture is small model on the Jetson for live commands, with larger models only as optional offboard planners that emit bounded skills.
-
-Pull the default model:
-
-```bash
-ollama pull qwen3:1.7b
-```
-
-Check Ollama:
-
-```bash
-ollama list
-curl http://localhost:11434/api/tags
-```
-
-## Jetson Orin Nano Setup
-
-JetPack `6.2.1` is Ubuntu 22.04 based and commonly ships Python 3.10. This project supports Python `>=3.10`, so the default JetPack Python should work.
-
-On the Jetson:
-
-```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip git portaudio19-dev
-
-cd ~
-mkdir -p robotics
-cd robotics
-git clone https://github.com/creeskis/go2_local_brain.git
-cd go2_local_brain
-bash bootstrap.sh
-```
-
-Install and prepare Ollama on the Jetson, then:
-
-```bash
-ollama pull qwen3:1.7b
-ollama list
-```
-
-Configure `.env`:
-
-```bash
-cp .env.example .env
-nano .env
-```
-
-Expected Jetson `.env`:
-
-```env
-GO2_IP=192.168.123.121
-GO2_AES_128_KEY=
-OLLAMA_MODEL=qwen3:1.7b
-# OLLAMA_HOST=
-# FORCE_MOTION_MODE=
-```
-
-Then run:
-
-```bash
-source .venv/bin/activate
-python -m unittest discover -s tests
-python -m go2_local_brain.main
-```
-
-## First Hardware Bring-Up Order
-
-Do not start with natural language movement. Bring it up in this order.
-
-1. Confirm network:
-
-```bash
-ping 192.168.123.121
-```
-
-2. Confirm Ollama:
-
-```bash
-ollama list
-curl http://localhost:11434/api/tags
-```
-
-3. Confirm imports/tests:
-
-```bash
-source .venv/bin/activate
-python scripts/smoke_test_imports.py
-python -m unittest discover -s tests
-```
-
-4. Run the app:
-
-```bash
-python -m go2_local_brain.main
-```
-
-5. Try only stationary commands first:
-
-```text
-stop
-stand up
-sit down
-```
-
-6. Then try tiny movement commands in a clear area:
-
-```text
-move forward a tiny bit
-turn left slowly
-stop
-```
-
-Watch logs for:
-
-- `Go2 WebRTC connected at 192.168.123.121`
-- `sport state: mode=... gait=...`
-- `move clamped: ...`
-- `motion mode already 'normal'`
-- `switching motion mode: ... -> 'normal'`
-
-## Motion Mode Notes
-
-Firmware `1.1.7` matters because upstream `unitree_webrtc_connect` has both normal sport examples and MCF sport examples for firmware `>=1.1.7`.
-
-The commands this app uses have matching IDs in both `SPORT_CMD` and `SPORT_CMD_MCF`:
+Firmware `1.1.7` supports MCF-related sport examples upstream. The current commands have matching IDs in normal and MCF tables:
 
 ```text
 BalanceStand = 1002
@@ -356,195 +493,25 @@ Move         = 1008
 Sit          = 1009
 ```
 
-So the app does not need a command-table switch for the current tool surface.
+Because these IDs match, the app does not currently need a command-table switch.
 
-The upstream MCF example warns that after `StandUp`, joints may be locked until `BalanceStand` is called. This app therefore chains:
-
-```text
-StandUp -> wait 2.5s -> BalanceStand
-```
-
-If the robot connects but ignores movement, try:
+If commands are ignored, use:
 
 ```env
 FORCE_MOTION_MODE=normal
 ```
 
-Then rerun the app. The driver will query `MOTION_SWITCHER`, switch to `normal` if needed, and wait about 5 seconds before accepting commands.
+That enables a startup pre-flight that mirrors upstream `sportmode.py`: query `MOTION_SWITCHER`, switch if needed, then wait for the controller to settle.
 
-## WebRTC And Firmware Notes
+## Sport State Telemetry
 
-This app uses `unitree_webrtc_connect` v2.x. There is no `SportClient` class in this version. The driver talks to:
+The driver subscribes passively to sport-state telemetry. It logs mode/gait transitions but does not yet block motion based on telemetry.
 
-```python
-conn.datachannel.pub_sub
-```
+Reason: the exact schema and enum values should be confirmed on this dog before making movement gates. False blocking during bring-up would make debugging harder.
 
-and publishes sport requests to:
+Future improvement: after hardware confirmation, refuse `move()` when posture/mode/fault state is unsafe.
 
-```python
-RTC_TOPIC["SPORT_MOD"]
-```
-
-The confirmed `Move` payload shape is:
-
-```json
-{"x": 0.2, "y": 0.0, "z": 0.0}
-```
-
-Where:
-
-- `x` is forward velocity in m/s.
-- `y` is lateral velocity in m/s, positive left.
-- `z` is yaw rate in rad/s, positive counter-clockwise.
-
-Firmware `1.1.7` is below the upstream `1.1.15+` AES-key threshold. That matches the current assumption that `GO2_AES_128_KEY` can remain blank. If WebRTC auth fails later, retrieve the key and set it in `.env`.
-
-## Running The App
-
-From the project root:
-
-```bash
-source .venv/bin/activate
-python -m go2_local_brain.main
-```
-
-The REPL starts:
-
-```text
-Go2 local brain ready. Type a command, or 'quit' to exit.
-go2>
-```
-
-Example prompts:
-
-```text
-stand up
-move forward a tiny bit
-turn left slowly
-stop
-sit down
-quit
-```
-
-The LLM prompt is intentionally compact and example-driven because `qwen3:1.7b` is small. Each user prompt should map to exactly one tool call.
-
-## Running Tests
-
-Run all non-hardware tests:
-
-```bash
-source .venv/bin/activate
-python -m unittest discover -s tests
-```
-
-The tests cover:
-
-- Ollama tool-call extraction from dict/object/JSON-string shapes.
-- Stop behavior on missing/unknown tools.
-- NaN/inf rejection.
-- Duration capping.
-- Move envelope shape.
-- Closed-channel failures.
-- Sport-state telemetry parsing.
-- Motion-mode response parsing.
-
-A clean test run should end with `OK`.
-
-## Upgrade The Code On A WSL Instance
-
-From the WSL instance:
-
-```bash
-cd ~/robotics/go2_local_brain
-git status
-git pull
-source .venv/bin/activate
-pip install -e .
-python -m unittest discover -s tests
-```
-
-If dependencies changed:
-
-```bash
-pip install --upgrade pip
-pip install -e .
-```
-
-If `.env.example` changed, compare it with your local `.env`:
-
-```bash
-diff -u .env.example .env
-```
-
-Do not overwrite `.env` blindly; it contains local deployment settings.
-
-## Upgrade The Code On Jetson
-
-On the Jetson:
-
-```bash
-cd ~/robotics/go2_local_brain
-git status
-git pull
-source .venv/bin/activate
-pip install -e .
-python -m unittest discover -s tests
-```
-
-Then run:
-
-```bash
-python -m go2_local_brain.main
-```
-
-If the app no longer starts after an upgrade, check:
-
-```bash
-python3 --version
-pip show unitree_webrtc_connect ollama python-dotenv rerun-sdk
-ollama list
-cat .env
-```
-
-## What To Change Safely
-
-Safe-ish changes:
-
-- Tweak the LLM examples in `src/go2_local_brain/brain/local_llm.py`.
-- Add more tests under `tests/`.
-- Add more logging.
-- Add passive telemetry fields from sport state.
-- Change `OLLAMA_MODEL` in `.env`.
-- Set `FORCE_MOTION_MODE=normal` when diagnosing ignored commands.
-
-Changes that need hardware caution:
-
-- Raising `MAX_VX`, `MAX_VY`, or `MAX_VYAW`.
-- Raising `MAX_MOVE_DURATION_S`.
-- Raising `DEADMAN_TIMEOUT_S`.
-- Automatically switching motion modes on every startup.
-- Gating movement on sport telemetry before confirming the exact schema.
-- Adding advanced MCF actions such as flips, jumps, or handstand-style commands.
-
-## Code Map
-
-```text
-src/go2_local_brain/
-  main.py                    Entry point and REPL wiring
-  config.py                  Environment/.env loader
-  brain/local_llm.py          Ollama tool-calling brain
-  driver/webrtc_client.py     Unitree WebRTC driver wrapper
-  safety/limits.py            Motion caps and deadman timeout
-  viz/rerun_logger.py         Placeholder Rerun logger
-scripts/
-  smoke_test_imports.py       Import/package smoke test
-tests/
-  test_brain.py               Brain/unit tests
-  test_driver.py              Driver/unit tests
-```
-
-## Key Environment Variables
+# Reference: Environment Variables
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -552,65 +519,21 @@ tests/
 | `GO2_AES_128_KEY` | blank | Optional AES key for newer firmware/auth cases |
 | `OLLAMA_MODEL` | `qwen3:1.7b` | Ollama model name |
 | `OLLAMA_HOST` | unset | Only set when Ollama is remote from the app |
-| `FORCE_MOTION_MODE` | unset | Optional mode switch, usually `normal` |
+| `FORCE_MOTION_MODE` | unset | Optional motion-mode switch, usually `normal` |
 
-## Troubleshooting
+# Reference: Model Choices
 
-### Robot does not connect
-
-Check:
-
-```bash
-ping 192.168.123.121
-```
-
-Then verify `.env`:
-
-```bash
-cat .env
-```
-
-Common causes:
-
-- `GO2_IP` accidentally points to the Jetson (`192.168.123.18`) instead of the dog.
-- The WSL instance cannot route to the `192.168.123.x` subnet.
-- Another client is already connected to the dog over WebRTC.
-- Firmware unexpectedly requires the AES key.
-
-### App connects but movement is ignored
-
-Try:
+## Default Model
 
 ```env
-FORCE_MOTION_MODE=normal
+OLLAMA_MODEL=qwen3:1.7b
 ```
 
-Then rerun. Also watch for `sport state: mode=... gait=...` logs.
+This is the right default for Jetson Orin Nano because the live robot brain only needs small, bounded tool choices.
 
-### Ollama fails
+## Larger Optional Models
 
-Check:
-
-```bash
-ollama list
-curl http://localhost:11434/api/tags
-```
-
-If Ollama is remote, set `OLLAMA_HOST`.
-
-### Model returns no tool call
-
-`qwen3:1.7b` is small. Keep prompts simple:
-
-```text
-stand up
-move forward a tiny bit
-turn left slowly
-stop
-sit down
-```
-
-If testing on a stronger machine, try:
+For an offboard planner or stronger WSL instance test:
 
 ```env
 OLLAMA_MODEL=qwen3:8b
@@ -622,24 +545,148 @@ or:
 OLLAMA_MODEL=lfm2.5:8b
 ```
 
-### pyaudio/portaudio build fails
+For slower planning with more memory:
 
-Install:
-
-```bash
-sudo apt install -y portaudio19-dev
+```env
+OLLAMA_MODEL=gpt-oss:20b
 ```
 
-Then reinstall:
+The safety layer does not change with the model.
+
+# Reference: Upgrading
+
+## Upgrade On A WSL Instance
 
 ```bash
+cd ~/robotics/go2_local_brain
+git status
+git pull
+source .venv/bin/activate
+pip install -e .
+python -m unittest discover -s tests
+```
+
+If `.env.example` changed, compare it with your local `.env`:
+
+```bash
+diff -u .env.example .env
+```
+
+Do not overwrite `.env` blindly.
+
+## Upgrade On Jetson
+
+```bash
+cd ~/robotics/go2_local_brain
+git status
+git pull
+source .venv/bin/activate
+pip install -e .
+python -m unittest discover -s tests
+```
+
+Then run:
+
+```bash
+python -m go2_local_brain.main
+```
+
+# Reference: What To Change
+
+## Safe Changes
+
+- Add tests under `tests/`.
+- Add more logging.
+- Tune examples in `src/go2_local_brain/brain/local_llm.py`.
+- Change `OLLAMA_MODEL` in `.env`.
+- Set `FORCE_MOTION_MODE=normal` during diagnostics.
+- Add passive sport-state fields for logging.
+
+## Hardware-Sensitive Changes
+
+Be careful with:
+
+- Raising `MAX_VX`, `MAX_VY`, or `MAX_VYAW`.
+- Raising `MAX_MOVE_DURATION_S`.
+- Raising `DEADMAN_TIMEOUT_S`.
+- Automatically forcing motion mode on every startup.
+- Blocking movement based on sport-state telemetry before confirming schema.
+- Adding dynamic/advanced MCF actions.
+
+# Reference: Troubleshooting
+
+## Robot Does Not Connect
+
+```bash
+ping -c 3 192.168.123.121
+cat .env
+```
+
+Check:
+
+- `GO2_IP` is `192.168.123.121`, not `192.168.123.18`.
+- The WSL instance or Jetson can route to `192.168.123.x`.
+- Another client is not already connected over WebRTC.
+- AES key is not unexpectedly required.
+
+## App Connects But Movement Is Ignored
+
+Set:
+
+```env
+FORCE_MOTION_MODE=normal
+```
+
+Then rerun:
+
+```bash
+source .venv/bin/activate
+python -m go2_local_brain.main
+```
+
+## Ollama Fails
+
+```bash
+ollama list
+curl http://localhost:11434/api/tags
+```
+
+If Ollama is remote, set:
+
+```bash
+export OLLAMA_HOST=http://<ollama-host-ip>:11434
+```
+
+## Model Returns No Tool Call
+
+Use simple prompts:
+
+```text
+stand up
+move forward a tiny bit
+turn left slowly
+stop
+sit down
+```
+
+If testing on stronger hardware, try a larger model:
+
+```env
+OLLAMA_MODEL=qwen3:8b
+```
+
+## pyaudio Or portaudio Build Fails
+
+```bash
+sudo apt update
+sudo apt install -y portaudio19-dev
 source .venv/bin/activate
 pip install -e .
 ```
 
-### WSL instance cannot see the robot subnet
+## WSL Instance Cannot Reach Robot Subnet
 
-Use mirrored networking:
+Confirm `.wslconfig`:
 
 ```ini
 [wsl2]
@@ -654,43 +701,28 @@ Restart WSL:
 wsl --shutdown
 ```
 
-Then reopen the WSL instance and retry:
+Then retry:
 
 ```bash
-ping 192.168.123.121
+ping -c 3 192.168.123.121
 ```
 
-## Future Work
+# Future Work
 
 Good next improvements:
 
-- Add a hardcoded diagnostic command path that bypasses Ollama for `stand`, `balance`, `tiny move`, and `stop`.
-- Add a `robot_balance_stand` tool.
-- Add a `robot_recovery_stand` tool.
-- Add a higher-level `relative_move(forward_m, left_m, yaw_deg)` skill.
-- Add telemetry-driven movement gates after confirming sport-state schema on real hardware.
+- Add a direct diagnostic command path that bypasses Ollama for `stand`, `balance`, `tiny move`, and `stop`.
+- Add `robot_balance_stand`.
+- Add `robot_recovery_stand`.
+- Add a higher-level `relative_move(forward_m, left_m, yaw_deg)` tool.
+- Add telemetry-driven movement gates after confirming sport-state schema.
 - Add a DimensionOS-compatible blueprint wrapper.
-- Add structured logs for first-run bring-up.
-- Add optional upstream example checks for `sportmode.py`, `sportmode_mcf.py`, and `sportmodestate.py`.
+- Add structured first-run logs.
+- Add optional checks against upstream `sportmode.py`, `sportmode_mcf.py`, and `sportmodestate.py`.
 
-## Golden Path Summary
+# Quick Command Summary
 
-For a WSL instance:
-
-```bash
-cd ~
-mkdir -p robotics
-cd robotics
-git clone https://github.com/creeskis/go2_local_brain.git
-cd go2_local_brain
-bash bootstrap.sh
-ollama pull qwen3:1.7b
-source .venv/bin/activate
-python -m unittest discover -s tests
-python -m go2_local_brain.main
-```
-
-For Jetson:
+WSL instance:
 
 ```bash
 cd ~
@@ -698,21 +730,36 @@ mkdir -p robotics
 cd robotics
 git clone https://github.com/creeskis/go2_local_brain.git
 cd go2_local_brain
-bash bootstrap.sh
-ollama pull qwen3:1.7b
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git curl portaudio19-dev
+python3 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .
+cp .env.example .env
+ollama pull qwen3:1.7b
+python scripts/smoke_test_imports.py
 python -m unittest discover -s tests
 python -m go2_local_brain.main
 ```
 
-Target `.env`:
+Jetson Orin:
 
-```env
-GO2_IP=192.168.123.121
-GO2_AES_128_KEY=
-OLLAMA_MODEL=qwen3:1.7b
-# OLLAMA_HOST=
-# FORCE_MOTION_MODE=
+```bash
+cd ~
+mkdir -p robotics
+cd robotics
+git clone https://github.com/creeskis/go2_local_brain.git
+cd go2_local_brain
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git curl portaudio19-dev
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -e .
+cp .env.example .env
+ollama pull qwen3:1.7b
+python scripts/smoke_test_imports.py
+python -m unittest discover -s tests
+python -m go2_local_brain.main
 ```
-
-Only set `FORCE_MOTION_MODE=normal` if the app connects but sport commands appear to be ignored.
