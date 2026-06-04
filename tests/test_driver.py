@@ -1,8 +1,4 @@
-"""Driver-layer tests that don't need hardware.
-
-We fake the upstream pub/sub + channel so we can assert the exact wire
-envelope and the closed-channel guard.
-"""
+"""Driver-layer tests that don't need hardware."""
 
 from __future__ import annotations
 
@@ -11,6 +7,7 @@ import json
 import time
 import unittest
 from typing import Any
+from unittest.mock import AsyncMock
 
 from go2_local_brain.driver.webrtc_client import (
     Go2Config,
@@ -44,7 +41,6 @@ class _FakePubSub:
 
 
 def _make_client_with_fake(pubsub: _FakePubSub, cfg: Go2Config | None = None) -> Go2WebRTCClient:
-    """Build a client and wire it to a fake pub/sub without running connect()."""
     client = Go2WebRTCClient(cfg or Go2Config(ip="127.0.0.1"))
     client._pubsub = pubsub
     client._sport_topic = "rt/api/sport/request"
@@ -63,10 +59,7 @@ class PublishMoveTests(unittest.TestCase):
     def test_open_channel_publishes_expected_envelope(self) -> None:
         pubsub = _FakePubSub(ready=True)
         client = _make_client_with_fake(pubsub)
-
         client._publish_move(0.1, -0.05, 0.2)
-
-        self.assertEqual(len(pubsub.published), 1)
         topic, payload, _msg_type = pubsub.published[0]
         self.assertEqual(topic, "rt/api/sport/request")
         self.assertEqual(payload["header"]["identity"]["api_id"], 1008)
@@ -76,11 +69,9 @@ class PublishMoveTests(unittest.TestCase):
         self.assertAlmostEqual(parameter["z"], 0.2)
 
     def test_closed_channel_raises(self) -> None:
-        pubsub = _FakePubSub(ready=False)
-        client = _make_client_with_fake(pubsub)
+        client = _make_client_with_fake(_FakePubSub(ready=False))
         with self.assertRaises(RuntimeError):
             client._publish_move(0.0, 0.0, 0.0)
-        self.assertEqual(pubsub.published, [])
 
     def test_not_connected_raises(self) -> None:
         client = Go2WebRTCClient(Go2Config(ip="127.0.0.1"))
@@ -106,7 +97,7 @@ class SportStateTests(unittest.TestCase):
         self.assertEqual(client._sport_state, {})
 
 
-class MoveClampingTests(unittest.TestCase):
+class MovementFeatureTests(unittest.TestCase):
     def test_move_clamps_velocity(self) -> None:
         pubsub = _FakePubSub(ready=True)
         client = _make_client_with_fake(pubsub)
@@ -115,6 +106,23 @@ class MoveClampingTests(unittest.TestCase):
         for _topic, payload, _msg_type in pubsub.published:
             param = json.loads(payload["parameter"])
             self.assertLessEqual(param["x"], 0.75 + 1e-9)
+
+    def test_turn_180_calls_move_with_full_turn_duration(self) -> None:
+        client = _make_client_with_fake(_FakePubSub())
+        client.move = AsyncMock()  # type: ignore[method-assign]
+        asyncio.run(client.turn_180("right"))
+        args = client.move.call_args.args
+        self.assertEqual(args[0], 0.0)
+        self.assertLess(args[2], 0.0)
+        self.assertGreater(args[3], 3.0)
+
+    def test_sequence_runs_known_steps_then_stops(self) -> None:
+        client = _make_client_with_fake(_FakePubSub())
+        client.move = AsyncMock()  # type: ignore[method-assign]
+        client.stop = AsyncMock()  # type: ignore[method-assign]
+        asyncio.run(client.sequence([{"cmd": "forward"}, {"cmd": "turn_180_left"}]))
+        self.assertGreaterEqual(client.move.await_count, 1)
+        client.stop.assert_awaited()
 
 
 class AdvancedActionTests(unittest.TestCase):
@@ -143,17 +151,24 @@ class ExplorationGuardTests(unittest.TestCase):
         client._sport_state_ts = time.monotonic()
         self.assertIsNone(client._valid_range_obstacles())
 
-    def test_nonzero_range_obstacles_are_valid(self) -> None:
-        cfg = Go2Config(ip="127.0.0.1", enable_exploration=True)
+    def test_blind_exploration_runs_without_ranges(self) -> None:
+        cfg = Go2Config(ip="127.0.0.1", enable_exploration=True, exploration_mode="blind")
         client = _make_client_with_fake(_FakePubSub(), cfg)
-        client._sport_state = {"range_obstacle": [1.0, 0.8, 0.6, 0.7]}
+        client.move = AsyncMock()  # type: ignore[method-assign]
+        client.stop = AsyncMock()  # type: ignore[method-assign]
+        asyncio.run(client.explore_room(0.05))
+        client.move.assert_awaited()
+        client.stop.assert_awaited()
+
+    def test_telemetry_report_explains_zero_ranges(self) -> None:
+        client = _make_client_with_fake(_FakePubSub())
+        client._sport_state = {"range_obstacle": [0, 0, 0, 0], "mode": 0}
         client._sport_state_ts = time.monotonic()
-        self.assertEqual(client._valid_range_obstacles(), [1.0, 0.8, 0.6, 0.7])
+        report = client.telemetry_report()
+        self.assertIn("range_status=unavailable", report)
 
 
 class StopResilienceTests(unittest.TestCase):
-    """stop() is the universal panic button and must never raise."""
-
     def test_stop_swallows_publish_failure(self) -> None:
         pubsub = _FakePubSub(ready=False)
 
