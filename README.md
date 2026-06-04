@@ -185,6 +185,14 @@ python -m go2_local_brain.gui --host 0.0.0.0 --port 8765
 
 Details: `docs/unified_gui.md`.
 
+For a separate manual-only cockpit with live video, WASD/QE controls, and exact legion1581 sport-command buttons:
+
+```bash
+python -m go2_local_brain.control_gui --host 0.0.0.0 --port 8770
+```
+
+Open `http://localhost:8770`. This GUI does not start AI or LiDAR.
+
 Good startup prompts:
 
 ```text

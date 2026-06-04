@@ -160,6 +160,18 @@ class AdvancedActionTests(unittest.TestCase):
         asyncio.run(client.advanced_action("backstand"))
         self.assertEqual(pubsub.requests[-1], ("rt/api/sport/request", {"api_id": 2050, "parameter": {"data": True}}))
 
+    def test_exact_sport_command_uses_mcf_candidate(self) -> None:
+        pubsub = _FakePubSub()
+        client = _make_client_with_fake(pubsub)
+        asyncio.run(client.sport_command("BackStand", {"data": True}))
+        self.assertEqual(pubsub.requests[-1], ("rt/api/sport/request", {"api_id": 2050, "parameter": {"data": True}}))
+
+    def test_available_sport_commands_includes_base_and_mcf(self) -> None:
+        client = _make_client_with_fake(_FakePubSub())
+        commands = client.available_sport_commands()
+        self.assertIn("Move", commands)
+        self.assertIn("BackStand", commands)
+
     def test_handstand_prefers_mcf_toggle_candidate(self) -> None:
         pubsub = _FakePubSub()
         client = _make_client_with_fake(pubsub)

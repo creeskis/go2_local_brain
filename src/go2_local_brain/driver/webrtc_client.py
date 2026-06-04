@@ -252,6 +252,15 @@ class Go2WebRTCClient:
         await self._sport_request_first(candidates)
         self._touch()
 
+    async def sport_command(self, cmd_name: str, parameter: Optional[dict[str, Any]] = None) -> None:
+        """Run an exact SPORT_CMD / SPORT_CMD_MCF command exposed by the installed SDK."""
+        await self._sport_request_first([(cmd_name, parameter)])
+        self._touch()
+
+    def available_sport_commands(self) -> list[str]:
+        """Return exact sport command names available from the installed package."""
+        return sorted(set(self._sport_cmd) | set(self._sport_cmd_mcf))
+
     async def turn_180(self, direction: str = "left") -> None:
         """Turn around approximately 180 degrees in place."""
         sign = -1.0 if direction.strip().lower() in {"right", "clockwise", "cw"} else 1.0
