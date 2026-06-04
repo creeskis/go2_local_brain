@@ -149,6 +149,10 @@ class Go2WebRTCClient:
             UnitreeWebRTCConnection,
             WebRTCConnectionMethod,
         )
+        try:
+            from unitree_webrtc_connect import SPORT_CMD_MCF  # type: ignore
+        except ImportError:
+            SPORT_CMD_MCF = {}
 
         kwargs: dict[str, Any] = {
             "connectionMethod": WebRTCConnectionMethod.LocalSTA,
@@ -174,7 +178,9 @@ class Go2WebRTCClient:
         self._sport_topic = RTC_TOPIC["SPORT_MOD"]
         self._sport_state_topic = RTC_TOPIC.get("LF_SPORT_MOD_STATE") or RTC_TOPIC.get("SPORT_MOD_STATE")
         self._motion_switcher_topic = RTC_TOPIC.get("MOTION_SWITCHER")
-        self._sport_cmd = dict(SPORT_CMD)
+        self._sport_cmd = _merge_sport_cmds(SPORT_CMD, SPORT_CMD_MCF)
+        if "BackStand" in self._sport_cmd:
+            log.info("advanced MCF sport actions available")
 
         if self._cfg.force_motion_mode:
             await self._force_motion_mode(self._cfg.force_motion_mode)
@@ -598,6 +604,15 @@ class Go2WebRTCClient:
             log.warning("motion mode set failed: %s", exc)
             return
         await asyncio.sleep(_MOTION_MODE_SETTLE_S)
+
+
+def _merge_sport_cmds(base: dict[str, int], *extras: dict[str, int]) -> dict[str, int]:
+    """Merge optional Unitree command tables without changing known base IDs."""
+    merged = dict(base)
+    for table in extras:
+        for name, api_id in dict(table).items():
+            merged.setdefault(name, api_id)
+    return merged
 
 
 def _normalize_action_name(name: str) -> str:
