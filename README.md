@@ -1,20 +1,21 @@
 # go2_local_brain
 
-A small, single-process Python brain for a **Unitree Go2 Air**. It turns typed natural-language commands into one safe robot tool call at a time using **Ollama**, then sends bounded motion commands over **WebRTC** through `unitree_webrtc_connect`.
+A small, single-process Python brain for a **Unitree Go2 Air**. It turns typed natural-language commands into one bounded robot tool call at a time using **Ollama**, then sends motion and sport/action commands over **WebRTC** through `unitree_webrtc_connect`.
 
-This README is split into two parts:
+This repo is organized for Cooper's known setup first:
 
 1. Installation guide for a **WSL instance**.
 2. Installation guide for the **Jetson Orin Nano**.
-3. Reference sections explaining how the app works, what to change, and how to troubleshoot it.
+3. Reference docs for how the driver, Ollama brain, motion tools, actions, and exploration work.
 
-Keep this repo private. It contains operational details about a real robot setup.
+Keep this repo private. It contains operational details for a real robot.
 
 ## Known Target Setup
 
 - Robot: Unitree Go2 Air
 - Firmware: `1.1.7`
 - Robot is RoboVerse-jailbroken with SSH/port 22 open
+- Custom package for firmware `1.1.7` installed
 - Robot STA/private-network control IP: `192.168.123.121`
 - Secondary/reachable Go2 IP observed: `192.168.123.161`
 - Jetson Orin target IP: `192.168.123.18`
@@ -108,7 +109,7 @@ cp .env.example .env
 nano .env
 ```
 
-Use this for WSL-local Ollama testing:
+Recommended WSL-local test config:
 
 ```env
 GO2_IP=192.168.123.121
@@ -116,9 +117,11 @@ GO2_AES_128_KEY=
 OLLAMA_MODEL=qwen3:1.7b
 # OLLAMA_HOST=
 # FORCE_MOTION_MODE=
+# ENABLE_EXPLORATION=1
+# EXPLORATION_MIN_OBSTACLE_M=0.35
 ```
 
-If the Python app runs in WSL but Ollama runs somewhere else, set `OLLAMA_HOST`:
+If the Python app runs in the WSL instance but Ollama runs somewhere else, set `OLLAMA_HOST`:
 
 ```env
 OLLAMA_HOST=http://<ollama-host-ip>:11434
@@ -128,23 +131,13 @@ If Ollama also runs inside this same WSL instance, leave `OLLAMA_HOST` unset.
 
 ## 7. Install Ollama In The WSL Instance
 
-Skip this section if Ollama already runs somewhere else and you plan to use `OLLAMA_HOST`.
+Skip this if Ollama already runs somewhere else and you plan to use `OLLAMA_HOST`.
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
-```
-
-Start or verify Ollama:
-
-```bash
 ollama --version
 ollama list
 curl http://localhost:11434/api/tags
-```
-
-Pull the default model:
-
-```bash
 ollama pull qwen3:1.7b
 ollama list
 ```
@@ -181,19 +174,47 @@ Go2 local brain ready. Type a command, or 'quit' to exit.
 go2>
 ```
 
-First commands to try:
+First commands:
 
 ```text
 stop
 stand up
+balance
 sit down
 ```
 
-Only after stationary commands look good, test tiny movement in a clear area:
+Then, in a clear area:
 
 ```text
-move forward a tiny bit
-turn left slowly
+walk forward
+walk and turn left
+strafe right
+turn left
+greet
+dance
+stop
+```
+
+Exploration is disabled by default. Only try it after `range_obstacle` telemetry is nonzero and believable:
+
+```bash
+nano .env
+```
+
+```env
+ENABLE_EXPLORATION=1
+EXPLORATION_MIN_OBSTACLE_M=0.35
+```
+
+Then:
+
+```bash
+source .venv/bin/activate
+python -m go2_local_brain.main
+```
+
+```text
+explore for three seconds
 stop
 ```
 
@@ -232,7 +253,7 @@ uname -a
 cat /etc/os-release
 ```
 
-JetPack `6.2.1` is Ubuntu 22.04 based and commonly has Python 3.10. This project supports Python `>=3.10`, so the default Python should be fine.
+JetPack `6.2.1` is Ubuntu 22.04 based and commonly has Python 3.10. This project supports Python `>=3.10`.
 
 ## 2. Confirm Network Reachability
 
@@ -281,7 +302,7 @@ cp .env.example .env
 nano .env
 ```
 
-Use this Jetson target config:
+Recommended Jetson config:
 
 ```env
 GO2_IP=192.168.123.121
@@ -289,6 +310,8 @@ GO2_AES_128_KEY=
 OLLAMA_MODEL=qwen3:1.7b
 # OLLAMA_HOST=
 # FORCE_MOTION_MODE=
+# ENABLE_EXPLORATION=1
+# EXPLORATION_MIN_OBSTACLE_M=0.35
 ```
 
 Leave `OLLAMA_HOST` unset because Ollama is intended to run locally on the Jetson.
@@ -297,19 +320,9 @@ Leave `OLLAMA_HOST` unset because Ollama is intended to run locally on the Jetso
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
-```
-
-Verify Ollama:
-
-```bash
 ollama --version
 ollama list
 curl http://localhost:11434/api/tags
-```
-
-Pull the Jetson default model:
-
-```bash
 ollama pull qwen3:1.7b
 ollama list
 ```
@@ -344,16 +357,25 @@ First commands:
 ```text
 stop
 stand up
+balance
 sit down
 ```
 
 Then, in a clear area:
 
 ```text
-move forward a tiny bit
-turn left slowly
+walk forward
+walk and turn left
+strafe right
+turn left
+greet
+dance
+jump
+pounce
 stop
 ```
+
+`jump` and `pounce` depend on which advanced `SPORT_CMD` names your installed `unitree_webrtc_connect` package exposes. If the command is missing, the app stops and prints a tool failure instead of guessing.
 
 ## 10. Optional Motion Mode Diagnostic
 
@@ -402,24 +424,75 @@ src/go2_local_brain/config.py                  .env/environment loader
 src/go2_local_brain/brain/local_llm.py          Ollama tool-calling brain
 src/go2_local_brain/driver/webrtc_client.py     Unitree WebRTC driver wrapper
 src/go2_local_brain/safety/limits.py            Motion caps and deadman timeout
-src/go2_local_brain/viz/rerun_logger.py         Placeholder Rerun logger
 scripts/smoke_test_imports.py                   Import/package smoke test
 tests/test_brain.py                             Brain tests
 tests/test_driver.py                            Driver tests
 ```
 
+## Confirmed WebRTC Behavior
+
+The live run connected successfully to `192.168.123.121` using LAN signaling:
+
+```text
+LAN Signaling Method : con_notify (192.168.123.121:9991)
+Data Channel Verification: OK
+Go2 WebRTC connected at 192.168.123.121
+```
+
+The ICE log showed several failed candidates, then a successful IPv6 peer reflexive candidate. That is fine; WebRTC tries candidates until one works.
+
+The sport-state stream arrived on `rt/lf/sportmodestate`, matching upstream `LF_SPORT_MOD_STATE` examples.
+
 ## Brain Layer
 
-`LocalRobotBrain` sends every prompt to Ollama with a compact system prompt and four tool schemas:
-
-- `robot_stand_up`
-- `robot_sit_down`
-- `robot_stop`
-- `robot_move`
-
-It deliberately executes only the first tool call. Multi-step plans are out of scope for this small local brain. The operator can issue another prompt for the next action.
+`LocalRobotBrain` sends every prompt to Ollama with a compact system prompt and tool schemas. It deliberately executes only the first tool call. Multi-step plans are out of scope for this small local brain; the operator can issue another prompt for the next action.
 
 If Ollama fails, returns no tool call, returns an unknown tool, or returns bad arguments, the brain calls `stop()`.
+
+Current tools:
+
+```text
+robot_stand_up
+robot_balance_stand
+robot_recovery_stand
+robot_sit_down
+robot_stop
+robot_step_forward
+robot_step_back
+robot_strafe_left
+robot_strafe_right
+robot_turn_left
+robot_turn_right
+robot_walk_turn
+robot_move
+robot_greet
+robot_dance
+robot_jump
+robot_pounce
+robot_stretch
+robot_wiggle
+robot_explore_room
+```
+
+Good prompt examples:
+
+```text
+stand up
+balance
+walk forward
+back up
+strafe left
+turn right
+walk forward while turning left
+greet
+dance
+jump
+pounce
+stretch
+explore for three seconds
+stop
+sit down
+```
 
 ## Driver Layer
 
@@ -430,8 +503,6 @@ The app uses the 2.x API shape:
 ```python
 conn.datachannel.pub_sub
 ```
-
-There is no `SportClient` in this package version.
 
 Sport requests are sent to:
 
@@ -451,22 +522,63 @@ Meaning:
 - `y`: lateral velocity in m/s, positive left
 - `z`: yaw rate in rad/s, positive counter-clockwise
 
-## Safety Layer
+Walking and turning at the same time is just one `Move` payload with both `x` and `z` nonzero.
+
+## Expanded Motion Limits
 
 Limits live in `src/go2_local_brain/safety/limits.py`:
 
 ```python
-MAX_VX = 0.35
-MAX_VY = 0.20
-MAX_VYAW = 0.45
-DEFAULT_MOVE_DURATION_S = 0.35
-MAX_MOVE_DURATION_S = 1.0
+MAX_VX = 0.75
+MAX_VY = 0.40
+MAX_VYAW = 1.10
+DEFAULT_MOVE_DURATION_S = 0.45
+MAX_MOVE_DURATION_S = 2.0
 DEADMAN_TIMEOUT_S = 0.75
 ```
 
 The driver clamps velocities. The brain rejects non-finite values and caps duration before the command reaches the driver.
 
 Do not rely on the model for safety. The model proposes; the driver enforces.
+
+## Advanced Actions
+
+The driver exposes named actions through `advanced_action()` and maps them to the first available upstream `SPORT_CMD` candidate:
+
+```text
+greet   -> Hello
+dance   -> Dance1, Dance2, WiggleHips
+jump    -> FrontJump, FreeJump
+pounce  -> FrontPounce, Pounce
+stretch -> Stretch
+wiggle  -> WiggleHips
+```
+
+If a command is not present in the installed `unitree_webrtc_connect` package, the action raises an error, the brain calls `stop()`, and the REPL reports the failure.
+
+## Exploration
+
+`robot_explore_room` runs short forward/turn steps for a bounded time. It is intentionally opt-in:
+
+```env
+ENABLE_EXPLORATION=1
+EXPLORATION_MIN_OBSTACLE_M=0.35
+```
+
+It refuses to run when:
+
+- `ENABLE_EXPLORATION` is not set.
+- Sport-state telemetry is missing or stale.
+- `range_obstacle` is missing.
+- `range_obstacle` is all zeros.
+
+Your live log showed:
+
+```text
+range_obstacle=[0,0,0,0]
+```
+
+That is treated as unavailable, not clear space. Exploration will refuse blind movement until telemetry is actually useful.
 
 ## StandUp And BalanceStand
 
@@ -482,7 +594,7 @@ This is why a single `stand up` prompt should leave the dog ready to accept norm
 
 ## Motion Mode
 
-Firmware `1.1.7` supports MCF-related sport examples upstream. The current commands have matching IDs in normal and MCF tables:
+Firmware `1.1.7` supports MCF-related sport examples upstream. The current core commands have matching IDs in normal and MCF tables:
 
 ```text
 BalanceStand = 1002
@@ -493,8 +605,6 @@ Move         = 1008
 Sit          = 1009
 ```
 
-Because these IDs match, the app does not currently need a command-table switch.
-
 If commands are ignored, use:
 
 ```env
@@ -502,14 +612,6 @@ FORCE_MOTION_MODE=normal
 ```
 
 That enables a startup pre-flight that mirrors upstream `sportmode.py`: query `MOTION_SWITCHER`, switch if needed, then wait for the controller to settle.
-
-## Sport State Telemetry
-
-The driver subscribes passively to sport-state telemetry. It logs mode/gait transitions but does not yet block motion based on telemetry.
-
-Reason: the exact schema and enum values should be confirmed on this dog before making movement gates. False blocking during bring-up would make debugging harder.
-
-Future improvement: after hardware confirmation, refuse `move()` when posture/mode/fault state is unsafe.
 
 # Reference: Environment Variables
 
@@ -520,38 +622,33 @@ Future improvement: after hardware confirmation, refuse `move()` when posture/mo
 | `OLLAMA_MODEL` | `qwen3:1.7b` | Ollama model name |
 | `OLLAMA_HOST` | unset | Only set when Ollama is remote from the app |
 | `FORCE_MOTION_MODE` | unset | Optional motion-mode switch, usually `normal` |
+| `ENABLE_EXPLORATION` | false | Enables telemetry-gated exploration |
+| `EXPLORATION_MIN_OBSTACLE_M` | `0.35` | Minimum obstacle distance for exploration |
+| `VERBOSE_WEBRTC_LOGS` | false | Restores upstream INFO packet logs |
 
 # Reference: Model Choices
 
-## Default Model
+Default:
 
 ```env
 OLLAMA_MODEL=qwen3:1.7b
 ```
 
-This is the right default for Jetson Orin Nano because the live robot brain only needs small, bounded tool choices.
+This is the right default for Jetson Orin Nano because the live brain now presents simple named tools. The model usually only needs to choose `robot_dance`, `robot_step_forward`, `robot_walk_turn`, etc., instead of inventing raw command sequences.
 
-## Larger Optional Models
-
-For an offboard planner or stronger WSL instance test:
+For stronger WSL-instance testing, you can try:
 
 ```env
 OLLAMA_MODEL=qwen3:8b
 ```
 
-or:
+For the American-model side project, evaluate models with:
 
-```env
-OLLAMA_MODEL=lfm2.5:8b
+```bash
+python scripts/eval_model_tools.py --model <model-name>
 ```
 
-For slower planning with more memory:
-
-```env
-OLLAMA_MODEL=gpt-oss:20b
-```
-
-The safety layer does not change with the model.
+See `docs/AMERICAN_MODEL_EVAL.md` for the current evaluation plan.
 
 # Reference: Upgrading
 
@@ -563,6 +660,7 @@ git status
 git pull
 source .venv/bin/activate
 pip install -e .
+python scripts/smoke_test_imports.py
 python -m unittest discover -s tests
 ```
 
@@ -582,36 +680,10 @@ git status
 git pull
 source .venv/bin/activate
 pip install -e .
+python scripts/smoke_test_imports.py
 python -m unittest discover -s tests
-```
-
-Then run:
-
-```bash
 python -m go2_local_brain.main
 ```
-
-# Reference: What To Change
-
-## Safe Changes
-
-- Add tests under `tests/`.
-- Add more logging.
-- Tune examples in `src/go2_local_brain/brain/local_llm.py`.
-- Change `OLLAMA_MODEL` in `.env`.
-- Set `FORCE_MOTION_MODE=normal` during diagnostics.
-- Add passive sport-state fields for logging.
-
-## Hardware-Sensitive Changes
-
-Be careful with:
-
-- Raising `MAX_VX`, `MAX_VY`, or `MAX_VYAW`.
-- Raising `MAX_MOVE_DURATION_S`.
-- Raising `DEADMAN_TIMEOUT_S`.
-- Automatically forcing motion mode on every startup.
-- Blocking movement based on sport-state telemetry before confirming schema.
-- Adding dynamic/advanced MCF actions.
 
 # Reference: Troubleshooting
 
@@ -663,8 +735,9 @@ Use simple prompts:
 
 ```text
 stand up
-move forward a tiny bit
-turn left slowly
+walk forward
+walk and turn left
+dance
 stop
 sit down
 ```
@@ -675,6 +748,28 @@ If testing on stronger hardware, try a larger model:
 OLLAMA_MODEL=qwen3:8b
 ```
 
+## Exploration Refuses To Run
+
+This is expected unless all three are true:
+
+- `ENABLE_EXPLORATION=1` is set.
+- Sport-state telemetry is arriving.
+- `range_obstacle` is nonzero and fresh.
+
+Run with verbose logs to inspect telemetry:
+
+```env
+VERBOSE_WEBRTC_LOGS=1
+```
+
+Then:
+
+```bash
+python -m go2_local_brain.main
+```
+
+If `range_obstacle` remains `[0,0,0,0]`, exploration is not available from that stream yet.
+
 ## pyaudio Or portaudio Build Fails
 
 ```bash
@@ -683,42 +778,6 @@ sudo apt install -y portaudio19-dev
 source .venv/bin/activate
 pip install -e .
 ```
-
-## WSL Instance Cannot Reach Robot Subnet
-
-Confirm `.wslconfig`:
-
-```ini
-[wsl2]
-networkingMode=mirrored
-memory=24GB
-processors=8
-```
-
-Restart WSL:
-
-```powershell
-wsl --shutdown
-```
-
-Then retry:
-
-```bash
-ping -c 3 192.168.123.121
-```
-
-# Future Work
-
-Good next improvements:
-
-- Add a direct diagnostic command path that bypasses Ollama for `stand`, `balance`, `tiny move`, and `stop`.
-- Add `robot_balance_stand`.
-- Add `robot_recovery_stand`.
-- Add a higher-level `relative_move(forward_m, left_m, yaw_deg)` tool.
-- Add telemetry-driven movement gates after confirming sport-state schema.
-- Add a DimensionOS-compatible blueprint wrapper.
-- Add structured first-run logs.
-- Add optional checks against upstream `sportmode.py`, `sportmode_mcf.py`, and `sportmodestate.py`.
 
 # Quick Command Summary
 
