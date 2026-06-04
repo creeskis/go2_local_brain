@@ -1,0 +1,1 @@
+"""Visualization layer (Rerun placeholder)."""
