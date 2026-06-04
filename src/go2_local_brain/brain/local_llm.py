@@ -1,15 +1,4 @@
-"""Local LLM brain: turn typed prompts into one robot tool call.
-
-Why this shape
---------------
-* ollama.chat() is synchronous and can take seconds - we run it in a worker
-  thread via asyncio.to_thread() so WebRTC keeps flowing on the main loop.
-* We deliberately execute only the *first* tool call. Multi-step plans are
-  out of scope for the local brain; the operator can issue another prompt
-  to get the next step.
-* Unknown tool name or no tool call at all -> emit a stop(). Safer default
-  than "ignore" because the LLM might have just hallucinated a verb.
-"""
+"""Local LLM brain: turn typed prompts into robot tool calls."""
 
 from __future__ import annotations
 
@@ -28,28 +17,24 @@ log = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
     "You are the motion brain for a Unitree Go2 Air quadruped robot.\n"
-    "On every user instruction, choose exactly ONE available tool. Use named "
-    "tools for postures, gestures, steps, turns, and exploration. Velocities "
-    "are in m/s and rad/s. Positive vx is forward, positive vy is left, "
-    "positive vyaw is counter-clockwise. The driver clamps hard limits, but "
-    "you should still prefer short, intentional commands: duration_s <= 1.2 "
-    "for normal movement and <= 6 for exploration. If the user wants a halt "
-    "or you are unsure, call robot_stop. Do not invent tools.\n\n"
+    "Choose exactly ONE tool call for each user message. You now have access "
+    "to linked command sequences, 180-degree turns, dance macros, and exploration. "
+    "Use robot_sequence for short chained moves. Use robot_explore_room when the user "
+    "asks the robot to explore; mode can be telemetry, relaxed, or blind. Blind mode "
+    "ignores obstacle telemetry and should only be used when explicitly requested or "
+    "when the operator says the area is clear. Use robot_telemetry_report to inspect "
+    "what telemetry the app currently sees. If the user asks for a full turnaround, "
+    "call robot_turn_180. Do not invent tools.\n\n"
+    "Sequence cmd values: forward, back, strafe_left, strafe_right, turn_left, "
+    "turn_right, walk_turn_left, walk_turn_right, turn_180_left, turn_180_right, "
+    "greet, dance, jump, pounce, stretch, wiggle, pause, stop.\n\n"
     "Examples:\n"
-    '  user: "stand up"                 -> robot_stand_up()\n'
-    '  user: "balance"                  -> robot_balance_stand()\n'
-    '  user: "walk forward"             -> robot_step_forward()\n'
-    '  user: "back up"                  -> robot_step_back()\n'
-    '  user: "strafe left"              -> robot_strafe_left()\n'
-    '  user: "turn right"               -> robot_turn_right()\n'
-    '  user: "walk and turn left"       -> robot_walk_turn(vx=0.45, vyaw=0.55, duration_s=0.8)\n'
-    '  user: "dance"                    -> robot_dance()\n'
-    '  user: "greet" / "say hi"         -> robot_greet()\n'
-    '  user: "jump"                     -> robot_jump()\n'
-    '  user: "pounce"                   -> robot_pounce()\n'
-    '  user: "explore for five seconds" -> robot_explore_room(duration_s=5)\n'
-    '  user: "stop" / "halt"            -> robot_stop()\n'
-    '  user: "lie down" / "sit"         -> robot_sit_down()\n'
+    '  user: "turn around" -> robot_turn_180(direction="left")\n'
+    '  user: "walk forward then turn right" -> robot_sequence(steps=[{"cmd":"forward"},{"cmd":"turn_right"}])\n'
+    '  user: "make up a dance" -> robot_dance_move(style="hype")\n'
+    '  user: "explore even without telemetry" -> robot_explore_room(duration_s=8, mode="blind")\n'
+    '  user: "why is obstacle data missing" -> robot_telemetry_report()\n'
+    '  user: "stop" -> robot_stop()\n'
 )
 
 
@@ -77,11 +62,38 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
     _empty_tool("robot_turn_left", "Turn counter-clockwise in place."),
     _empty_tool("robot_turn_right", "Turn clockwise in place."),
     _empty_tool("robot_greet", "Run the Go2 greeting / hello action."),
-    _empty_tool("robot_dance", "Run a Go2 dance action."),
+    _empty_tool("robot_dance", "Run a firmware Go2 dance action."),
     _empty_tool("robot_jump", "Run a Go2 jump action if this firmware exposes one."),
     _empty_tool("robot_pounce", "Run a Go2 pounce action if this firmware exposes one."),
     _empty_tool("robot_stretch", "Run a Go2 stretch action."),
     _empty_tool("robot_wiggle", "Run a Go2 wiggle-hips action if exposed."),
+    _empty_tool("robot_telemetry_report", "Report sport-state telemetry keys and obstacle status."),
+    {
+        "type": "function",
+        "function": {
+            "name": "robot_turn_180",
+            "description": "Turn around approximately 180 degrees in place.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "enum": ["left", "right"]},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "robot_dance_move",
+            "description": "Run a movement-based dance macro. Styles: hype, sway, spin.",
+            "parameters": {
+                "type": "object",
+                "properties": {"style": {"type": "string", "enum": ["hype", "sway", "spin"]}},
+                "required": [],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -90,11 +102,35 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "vx": {"type": "number", "description": "Forward velocity. Positive forward."},
-                    "vyaw": {"type": "number", "description": "Yaw rate. Positive turns left/CCW."},
-                    "duration_s": {"type": "number", "description": "Duration in seconds."},
+                    "vx": {"type": "number"},
+                    "vyaw": {"type": "number"},
+                    "duration_s": {"type": "number"},
                 },
                 "required": ["vx", "vyaw"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "robot_sequence",
+            "description": "Execute up to 8 linked known movement/action commands.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "cmd": {"type": "string"},
+                                "duration_s": {"type": "number"},
+                            },
+                            "required": ["cmd"],
+                        },
+                    }
+                },
+                "required": ["steps"],
             },
         },
     },
@@ -106,10 +142,10 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "vx": {"type": "number", "description": "Forward velocity, m/s. Positive = forward."},
-                    "vy": {"type": "number", "description": "Lateral velocity, m/s. Positive = left."},
-                    "vyaw": {"type": "number", "description": "Yaw rate, rad/s. Positive = CCW."},
-                    "duration_s": {"type": "number", "description": "How long to apply the velocity, seconds."},
+                    "vx": {"type": "number"},
+                    "vy": {"type": "number"},
+                    "vyaw": {"type": "number"},
+                    "duration_s": {"type": "number"},
                 },
                 "required": ["vx"],
             },
@@ -119,11 +155,12 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "robot_explore_room",
-            "description": "Explore with short telemetry-gated forward/turn steps. Requires ENABLE_EXPLORATION=1.",
+            "description": "Explore with short forward/turn steps. Modes: telemetry, relaxed, blind.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "duration_s": {"type": "number", "description": "Exploration duration in seconds, max 8."},
+                    "duration_s": {"type": "number"},
+                    "mode": {"type": "string", "enum": ["telemetry", "relaxed", "blind"]},
                 },
                 "required": [],
             },
@@ -138,7 +175,7 @@ class LocalRobotBrain:
     def __init__(self, client: Go2WebRTCClient, model: str) -> None:
         self._client = client
         self._model = model
-        self._tools: dict[str, Callable[..., Awaitable[None]]] = {
+        self._tools: dict[str, Callable[..., Awaitable[Any]]] = {
             "robot_stand_up": self._tool_stand_up,
             "robot_balance_stand": self._tool_balance_stand,
             "robot_recovery_stand": self._tool_recovery_stand,
@@ -151,14 +188,18 @@ class LocalRobotBrain:
             "robot_strafe_right": self._tool_strafe_right,
             "robot_turn_left": self._tool_turn_left,
             "robot_turn_right": self._tool_turn_right,
+            "robot_turn_180": self._tool_turn_180,
             "robot_walk_turn": self._tool_walk_turn,
+            "robot_sequence": self._tool_sequence,
             "robot_greet": self._tool_greet,
             "robot_dance": self._tool_dance,
+            "robot_dance_move": self._tool_dance_move,
             "robot_jump": self._tool_jump,
             "robot_pounce": self._tool_pounce,
             "robot_stretch": self._tool_stretch,
             "robot_wiggle": self._tool_wiggle,
             "robot_explore_room": self._tool_explore_room,
+            "robot_telemetry_report": self._tool_telemetry_report,
         }
 
     async def _tool_stand_up(self, **_: Any) -> None:
@@ -194,20 +235,25 @@ class LocalRobotBrain:
     async def _tool_turn_right(self, **_: Any) -> None:
         await self._client.move(0.0, 0.0, -0.75, 0.55)
 
-    async def _tool_walk_turn(
-        self,
-        vx: float = 0.35,
-        vyaw: float = 0.45,
-        duration_s: float = DEFAULT_MOVE_DURATION_S,
-        **_: Any,
-    ) -> None:
+    async def _tool_turn_180(self, direction: str = "left", **_: Any) -> None:
+        await self._client.turn_180(direction)
+
+    async def _tool_walk_turn(self, vx: float = 0.35, vyaw: float = 0.45, duration_s: float = DEFAULT_MOVE_DURATION_S, **_: Any) -> None:
         await self._tool_move(vx=vx, vy=0.0, vyaw=vyaw, duration_s=duration_s)
+
+    async def _tool_sequence(self, steps: list[dict[str, Any]], **_: Any) -> None:
+        if not isinstance(steps, list):
+            raise ValueError("steps must be a list")
+        await self._client.sequence(steps)
 
     async def _tool_greet(self, **_: Any) -> None:
         await self._client.advanced_action("greet")
 
     async def _tool_dance(self, **_: Any) -> None:
         await self._client.advanced_action("dance")
+
+    async def _tool_dance_move(self, style: str = "hype", **_: Any) -> None:
+        await self._client.dance_move(style)
 
     async def _tool_jump(self, **_: Any) -> None:
         await self._client.advanced_action("jump")
@@ -221,20 +267,16 @@ class LocalRobotBrain:
     async def _tool_wiggle(self, **_: Any) -> None:
         await self._client.advanced_action("wiggle")
 
-    async def _tool_explore_room(self, duration_s: float = 3.0, **_: Any) -> None:
+    async def _tool_explore_room(self, duration_s: float = 5.0, mode: str | None = None, **_: Any) -> None:
         value = float(duration_s)
         if not math.isfinite(value):
             raise ValueError("duration_s must be finite")
-        await self._client.explore_room(value)
+        await self._client.explore_room(value, mode=mode)
 
-    async def _tool_move(
-        self,
-        vx: float = 0.0,
-        vy: float = 0.0,
-        vyaw: float = 0.0,
-        duration_s: float = DEFAULT_MOVE_DURATION_S,
-        **_: Any,
-    ) -> None:
+    async def _tool_telemetry_report(self, **_: Any) -> str:
+        return self._client.telemetry_report()
+
+    async def _tool_move(self, vx: float = 0.0, vy: float = 0.0, vyaw: float = 0.0, duration_s: float = DEFAULT_MOVE_DURATION_S, **_: Any) -> None:
         values = (float(vx), float(vy), float(vyaw), float(duration_s))
         if not all(math.isfinite(v) for v in values):
             raise ValueError("move arguments must be finite numbers")
@@ -242,19 +284,13 @@ class LocalRobotBrain:
         await self._client.move(values[0], values[1], values[2], safe_duration)
 
     async def handle(self, user_text: str) -> str:
-        """Ask the model what to do, then run the first tool call."""
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_text},
         ]
 
         try:
-            response = await asyncio.to_thread(
-                ollama.chat,
-                model=self._model,
-                messages=messages,
-                tools=_TOOL_SCHEMAS,
-            )
+            response = await asyncio.to_thread(ollama.chat, model=self._model, messages=messages, tools=_TOOL_SCHEMAS)
         except Exception as exc:  # noqa: BLE001
             log.exception("ollama.chat failed: %s", exc)
             await self._client.stop()
@@ -275,7 +311,7 @@ class LocalRobotBrain:
             return f"unknown tool {name!r} -> stop"
 
         try:
-            await fn(**args)
+            result = await fn(**args)
         except TypeError as exc:
             await self._client.stop()
             return f"bad args for {name}: {exc} -> stop"
@@ -284,10 +320,10 @@ class LocalRobotBrain:
             await self._client.stop()
             return f"tool {name} failed: {exc} -> stop"
 
-        return f"called {name}({_format_args(args)})"
+        suffix = f" -> {result}" if result is not None else ""
+        return f"called {name}({_format_args(args)}){suffix}"
 
     async def repl(self) -> None:
-        """Read prompts in a worker thread and dispatch them."""
         print("Go2 local brain ready. Type a command, or 'quit' to exit.")
         while True:
             try:
@@ -304,7 +340,6 @@ class LocalRobotBrain:
 
 
 def _extract_tool_calls(response: Any) -> list[dict[str, Any]]:
-    """Pull tool calls out of an Ollama chat response, robust to dict/object form."""
     message = _get(response, "message")
     if message is None:
         return []
@@ -327,7 +362,6 @@ def _extract_tool_calls(response: Any) -> list[dict[str, Any]]:
 
 
 def _get(obj: Any, key: str) -> Any:
-    """Read a field from either a dict or a pydantic-style object."""
     if obj is None:
         return None
     if isinstance(obj, dict):
