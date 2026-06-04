@@ -177,6 +177,14 @@ python -m go2_local_brain.main
 
 # What The Dog Can Do Now
 
+For the combined browser controller with manual buttons, AI commands, live video, and LiDAR, see:
+
+```bash
+python -m go2_local_brain.gui --host 0.0.0.0 --port 8765
+```
+
+Details: `docs/unified_gui.md`.
+
 Good startup prompts:
 
 ```text
