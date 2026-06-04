@@ -55,6 +55,48 @@ _ADVANCED_ACTIONS: dict[str, list[str]] = {
     "wallow": ["Wallow"],
 }
 
+_SEQUENCE_ALIASES: dict[str, str] = {
+    "forward": "forward",
+    "walkforward": "forward",
+    "stepforward": "forward",
+    "robotstepforward": "forward",
+    "robotwalkforward": "forward",
+    "robotforward": "forward",
+    "back": "back",
+    "backward": "back",
+    "walkback": "back",
+    "stepback": "back",
+    "robotstepback": "back",
+    "left": "strafe_left",
+    "strafeleft": "strafe_left",
+    "robotstrafeleft": "strafe_left",
+    "right": "strafe_right",
+    "straferight": "strafe_right",
+    "robotstraferight": "strafe_right",
+    "turnleft": "turn_left",
+    "robotturnleft": "turn_left",
+    "turnleft90": "turn_90_left",
+    "robotturnleft90": "turn_90_left",
+    "turnright": "turn_right",
+    "robotturnright": "turn_right",
+    "turnright90": "turn_90_right",
+    "robotturnright90": "turn_90_right",
+    "walkturnleft": "walk_turn_left",
+    "robotwalkturnleft": "walk_turn_left",
+    "walkturnright": "walk_turn_right",
+    "robotwalkturnright": "walk_turn_right",
+    "turn180left": "turn_180_left",
+    "turnaroundleft": "turn_180_left",
+    "robotturn180left": "turn_180_left",
+    "turn180right": "turn_180_right",
+    "turnaroundright": "turn_180_right",
+    "robotturn180right": "turn_180_right",
+    "pause": "pause",
+    "wait": "pause",
+    "stop": "stop",
+    "robotstop": "stop",
+}
+
 
 @dataclass
 class Go2Config:
@@ -65,8 +107,6 @@ class Go2Config:
     force_motion_mode: Optional[str] = None
     enable_exploration: bool = False
     exploration_min_obstacle_m: float = 0.35
-    # telemetry: require nonzero range_obstacle. relaxed: use it if present,
-    # otherwise continue with short cautious turns/steps. blind: ignore range.
     exploration_mode: str = "telemetry"
     exploration_max_duration_s: float = 15.0
 
@@ -198,6 +238,13 @@ class Go2WebRTCClient:
         sign = -1.0 if direction.strip().lower() in {"right", "clockwise", "cw"} else 1.0
         await self.move(0.0, 0.0, sign * _TURN_180_VYAW, _TURN_180_DURATION_S)
 
+    async def turn_degrees(self, direction: str, degrees: float) -> None:
+        """Turn an approximate number of degrees by scaling the tested 180 turn."""
+        clamped_degrees = min(max(abs(float(degrees)), 15.0), 360.0)
+        sign = -1.0 if direction.strip().lower() in {"right", "clockwise", "cw"} else 1.0
+        duration = _TURN_180_DURATION_S * (clamped_degrees / 180.0)
+        await self.move(0.0, 0.0, sign * _TURN_180_VYAW, duration)
+
     async def dance_move(self, style: str = "hype") -> None:
         """Run a movement-based dance macro, with firmware gestures when present."""
         key = _normalize_action_name(style)
@@ -230,38 +277,42 @@ class Go2WebRTCClient:
         for step in steps[:_MAX_SEQUENCE_STEPS]:
             if not isinstance(step, dict):
                 continue
-            cmd = str(step.get("cmd", "")).strip().lower()
+            cmd = _canonical_sequence_cmd(str(step.get("cmd", "")))
             duration = float(step.get("duration_s", DEFAULT_MOVE_DURATION_S))
             duration = min(max(duration, 0.05), 2.5)
             await self._run_sequence_step(cmd, duration)
         await self.stop()
 
     async def _run_sequence_step(self, cmd: str, duration_s: float) -> None:
-        if cmd in {"forward", "walk_forward", "step_forward"}:
+        if cmd == "forward":
             await self.move(0.45, 0.0, 0.0, duration_s)
-        elif cmd in {"back", "backward", "step_back"}:
+        elif cmd == "back":
             await self.move(-0.32, 0.0, 0.0, duration_s)
-        elif cmd in {"left", "strafe_left"}:
+        elif cmd == "strafe_left":
             await self.move(0.0, 0.30, 0.0, duration_s)
-        elif cmd in {"right", "strafe_right"}:
+        elif cmd == "strafe_right":
             await self.move(0.0, -0.30, 0.0, duration_s)
-        elif cmd in {"turn_left"}:
+        elif cmd == "turn_left":
             await self.move(0.0, 0.0, 0.85, duration_s)
-        elif cmd in {"turn_right"}:
+        elif cmd == "turn_right":
             await self.move(0.0, 0.0, -0.85, duration_s)
-        elif cmd in {"walk_turn_left"}:
+        elif cmd == "turn_90_left":
+            await self.turn_degrees("left", 90.0)
+        elif cmd == "turn_90_right":
+            await self.turn_degrees("right", 90.0)
+        elif cmd == "walk_turn_left":
             await self.move(0.35, 0.0, 0.75, duration_s)
-        elif cmd in {"walk_turn_right"}:
+        elif cmd == "walk_turn_right":
             await self.move(0.35, 0.0, -0.75, duration_s)
-        elif cmd in {"turn_180_left", "turnaround_left"}:
+        elif cmd == "turn_180_left":
             await self.turn_180("left")
-        elif cmd in {"turn_180_right", "turnaround_right"}:
+        elif cmd == "turn_180_right":
             await self.turn_180("right")
         elif cmd in _ADVANCED_ACTIONS:
             await self._try_advanced_action(cmd)
-        elif cmd in {"pause", "wait"}:
+        elif cmd == "pause":
             await asyncio.sleep(duration_s)
-        elif cmd in {"stop"}:
+        elif cmd == "stop":
             await self.stop()
         else:
             raise RuntimeError(f"unknown sequence command {cmd!r}")
@@ -310,13 +361,7 @@ class Go2WebRTCClient:
             pass
 
     async def explore_room(self, duration_s: float = 3.0, mode: Optional[str] = None) -> None:
-        """Explore with short forward/turn steps.
-
-        Modes:
-        * telemetry: require fresh nonzero range_obstacle.
-        * relaxed: use range_obstacle if present; otherwise keep moving in small arcs.
-        * blind: ignore range_obstacle entirely.
-        """
+        """Explore with short forward/turn steps."""
         if not self._cfg.enable_exploration:
             raise RuntimeError("exploration is disabled; set ENABLE_EXPLORATION=1 to opt in")
         active_mode = (mode or self._cfg.exploration_mode).strip().lower()
@@ -338,7 +383,6 @@ class Go2WebRTCClient:
                 raise RuntimeError("range_obstacle telemetry went stale during exploration")
 
             if active_mode == "blind" or ranges is None:
-                # Gentle roaming pattern when no obstacle signal is available.
                 turn_sign = -turn_sign if step_count % 4 == 3 else turn_sign
                 await self.move(_EXPLORE_VX, 0.0, 0.25 * turn_sign, _EXPLORE_STEP_S)
             else:
@@ -549,6 +593,27 @@ class Go2WebRTCClient:
 
 def _normalize_action_name(name: str) -> str:
     return name.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _compact_name(name: str) -> str:
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def _canonical_sequence_cmd(name: str) -> str:
+    compact = _compact_name(name)
+    if compact in _SEQUENCE_ALIASES:
+        return _SEQUENCE_ALIASES[compact]
+    if compact.startswith("robot"):
+        compact = compact[5:]
+        if compact in _SEQUENCE_ALIASES:
+            return _SEQUENCE_ALIASES[compact]
+    action_key = _normalize_action_name(name)
+    if action_key in _ADVANCED_ACTIONS:
+        return action_key
+    compact_action = _normalize_action_name(compact)
+    if compact_action in _ADVANCED_ACTIONS:
+        return compact_action
+    return name.strip().lower()
 
 
 def _request_msg_type() -> str:
