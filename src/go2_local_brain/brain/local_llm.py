@@ -23,19 +23,24 @@ _SYSTEM_PROMPT = (
     "Use simple sequence cmd values, not tool names: forward, back, strafe_left, "
     "strafe_right, turn_left, turn_right, turn_90_left, turn_90_right, "
     "walk_turn_left, walk_turn_right, turn_180_left, turn_180_right, greet, "
-    "dance, jump, pounce, stretch, wiggle, pause, stop. The driver can tolerate "
-    "aliases, but prefer these exact strings.\n\n"
+    "dance, jump, pounce, stretch, wiggle, handstand, backstand, pause, stop. "
+    "The driver can tolerate aliases, but prefer these exact strings.\n\n"
+    "If the user asks for hind legs, back legs, rear legs, stand on two legs, "
+    "or stand upright, choose robot_backstand. If the user explicitly asks for "
+    "handstand/front-leg stunt, choose robot_handstand. Do not map those requests "
+    "to robot_stand_up or robot_balance_stand.\n\n"
     "Use robot_explore_room when the user asks the robot to explore; mode can be "
-    "telemetry, relaxed, or blind. Blind mode ignores obstacle telemetry and should "
-    "only be used when explicitly requested or when the operator says the area is clear. "
-    "Use robot_telemetry_report to inspect what telemetry the app currently sees. "
-    "If the user asks for a full turnaround, call robot_turn_180 unless it is part "
-    "of a multi-step request, in which case use robot_sequence. Do not invent tools.\n\n"
+    "telemetry, relaxed, or blind. Use robot_telemetry_report to inspect what "
+    "telemetry the app currently sees. If the user asks for a full turnaround, "
+    "call robot_turn_180 unless it is part of a multi-step request, in which case "
+    "use robot_sequence. Do not invent tools.\n\n"
     "Examples:\n"
+    '  user: "stand on your hind legs" -> robot_backstand()\n'
+    '  user: "stand on your back legs" -> robot_backstand()\n'
+    '  user: "do a handstand" -> robot_handstand()\n'
     '  user: "turn around" -> robot_turn_180(direction="left")\n'
     '  user: "turn right 90 degrees, then walk forward" -> robot_sequence(steps=[{"cmd":"turn_90_right"},{"cmd":"forward"}])\n'
     '  user: "jump, then walk forward" -> robot_sequence(steps=[{"cmd":"jump"},{"cmd":"forward"}])\n'
-    '  user: "walk forward then turn right" -> robot_sequence(steps=[{"cmd":"forward"},{"cmd":"turn_right"}])\n'
     '  user: "make up a dance" -> robot_dance_move(style="hype")\n'
     '  user: "explore even without telemetry" -> robot_explore_room(duration_s=8, mode="blind")\n'
     '  user: "why is obstacle data missing" -> robot_telemetry_report()\n'
@@ -72,6 +77,8 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
     _empty_tool("robot_pounce", "Run a Go2 pounce action if this firmware exposes one."),
     _empty_tool("robot_stretch", "Run a Go2 stretch action."),
     _empty_tool("robot_wiggle", "Run a Go2 wiggle-hips action if exposed."),
+    _empty_tool("robot_handstand", "Run the firmware Handstand / HandStand action."),
+    _empty_tool("robot_backstand", "Run the firmware BackStand action for hind-leg upright behavior."),
     _empty_tool("robot_telemetry_report", "Report sport-state telemetry keys and obstacle status."),
     {
         "type": "function",
@@ -201,6 +208,8 @@ class LocalRobotBrain:
             "robot_pounce": self._tool_pounce,
             "robot_stretch": self._tool_stretch,
             "robot_wiggle": self._tool_wiggle,
+            "robot_handstand": self._tool_handstand,
+            "robot_backstand": self._tool_backstand,
             "robot_explore_room": self._tool_explore_room,
             "robot_telemetry_report": self._tool_telemetry_report,
         }
@@ -269,6 +278,12 @@ class LocalRobotBrain:
 
     async def _tool_wiggle(self, **_: Any) -> None:
         await self._client.advanced_action("wiggle")
+
+    async def _tool_handstand(self, **_: Any) -> None:
+        await self._client.advanced_action("handstand")
+
+    async def _tool_backstand(self, **_: Any) -> None:
+        await self._client.advanced_action("backstand")
 
     async def _tool_explore_room(self, duration_s: float = 5.0, mode: str | None = None, **_: Any) -> None:
         value = float(duration_s)
