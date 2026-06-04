@@ -69,6 +69,7 @@ class UnifiedGui:
         app.router.add_get("/ws", self._websocket)
         app.router.add_get("/video.mjpg", self._video_stream)
         app.router.add_get("/status.json", self._status_json)
+        app.router.add_get("/debug/lidar.json", self._debug_lidar)
         app.router.add_post("/api/manual/{action}", self._manual_action)
         app.router.add_post("/api/ai", self._ai_action)
         app.router.add_post("/api/stop", self._stop_action)
@@ -176,6 +177,18 @@ class UnifiedGui:
 
     async def _status_json(self, _request: web.Request) -> web.Response:
         return web.json_response(self._status_payload())
+
+    async def _debug_lidar(self, _request: web.Request) -> web.Response:
+        latest = self._latest_lidar or {}
+        return web.json_response(
+            {
+                "status": self._status_payload(),
+                "point_count": latest.get("point_count"),
+                "source_point_count": latest.get("source_point_count"),
+                "bounds": latest.get("bounds"),
+                "sample_points": (latest.get("points") or [])[:8],
+            }
+        )
 
     async def _websocket(self, request: web.Request) -> web.StreamResponse:
         ws = web.WebSocketResponse(heartbeat=15)
@@ -415,7 +428,7 @@ _INDEX_HTML = """<!doctype html>
     </aside>
     <section class="media">
       <div class="videoWrap"><img id="video" src="/video.mjpg" alt="Live robot video"></div>
-      <div id="lidarPanel"><canvas id="lidarCanvas"></canvas><div id="hud">LiDAR: <span id="lidarCount">0</span><br><span id="lidarDebug">waiting</span></div></div>
+      <div id="lidarPanel"><canvas id="lidarCanvas"></canvas><div id="hud">LiDAR: <span id="lidarCount">0</span><br><span id="lidarDebug">waiting</span><br><span id="lidarBounds">bounds: none</span></div></div>
     </section>
   </main>
   <script>
@@ -459,6 +472,7 @@ _INDEX_HTML = """<!doctype html>
     scene.add(new THREE.GridHelper(10, 20, 0x3a3f48, 0x242930));
     scene.add(new THREE.AxesHelper(1.5));
     let cloud = null;
+    let cloudFitted = false;
     function resize() {
       const r = canvas.parentElement.getBoundingClientRect();
       renderer.setSize(r.width, r.height, false);
@@ -466,7 +480,21 @@ _INDEX_HTML = """<!doctype html>
       camera.updateProjectionMatrix();
     }
     window.addEventListener("resize", resize); resize();
-    function setCloud(points, distances) {
+    function fitCloud(bounds) {
+      if (!bounds || cloudFitted) return;
+      const min = bounds.min, max = bounds.max;
+      const center = new THREE.Vector3((min[0]+max[0])/2, (min[1]+max[1])/2, (min[2]+max[2])/2);
+      const span = Math.max(max[0]-min[0], max[1]-min[1], max[2]-min[2], 1);
+      controls.target.copy(center);
+      camera.position.set(center.x + span * 1.4, center.y + span * 1.1, center.z + span * 1.4);
+      camera.near = Math.max(0.01, span / 1000);
+      camera.far = Math.max(1000, span * 20);
+      camera.updateProjectionMatrix();
+      controls.update();
+      cloudFitted = true;
+    }
+    function setCloud(points, distances, bounds) {
+      if (!points || points.length === 0) return;
       if (cloud) scene.remove(cloud);
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.Float32BufferAttribute(points.flat(), 3));
@@ -475,6 +503,7 @@ _INDEX_HTML = """<!doctype html>
       geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
       cloud = new THREE.Points(geo, new THREE.PointsMaterial({size:0.035, vertexColors:true}));
       scene.add(cloud);
+      fitCloud(bounds);
     }
     const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
     ws.onmessage = (ev) => {
@@ -487,7 +516,8 @@ _INDEX_HTML = """<!doctype html>
       }
       if (msg.type === "lidar") {
         document.getElementById("lidarCount").textContent = `${msg.point_count} / ${msg.source_point_count}`;
-        setCloud(msg.points, msg.distances);
+        if (msg.bounds) document.getElementById("lidarBounds").textContent = `bounds: min=${msg.bounds.min.map(v=>v.toFixed(1)).join(",")} max=${msg.bounds.max.map(v=>v.toFixed(1)).join(",")}`;
+        setCloud(msg.points, msg.distances, msg.bounds);
       }
     };
     function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }

@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import unittest
-import struct
 
 from go2_local_brain.viewer import (
     _coerce_position_values,
     _decimate,
-    _float32_triplets_from_byte_values,
     _lidar_payload_from_message,
     _points_from_positions,
     _xyz_triplets,
@@ -35,10 +33,10 @@ class LidarPayloadTests(unittest.TestCase):
         assert payload is not None
         self.assertEqual(payload["points"], [[0.0, 0.0, 0.0]])
 
-    def test_lidar_payload_accepts_numpy_like_float32_bytes(self) -> None:
+    def test_lidar_payload_accepts_numpy_like_positions(self) -> None:
         class FakeArray:
             def tolist(self) -> list[int]:
-                return list(struct.pack("<ffffff", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
+                return [1, 2, 3, 4, 5, 6]
 
         message = {"data": {"stamp": 123, "data": {"positions": FakeArray()}}}
         payload = _lidar_payload_from_message(message, max_points=10)
@@ -48,10 +46,6 @@ class LidarPayloadTests(unittest.TestCase):
 
     def test_coerce_positions_accepts_bytearray(self) -> None:
         self.assertEqual(_coerce_position_values(bytearray([1, 2, 3])), [1, 2, 3])
-
-    def test_float32_triplets_from_byte_values(self) -> None:
-        values = list(struct.pack("<ffffff", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
-        self.assertEqual(_float32_triplets_from_byte_values(values), [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
 
     def test_points_from_positions_keeps_short_numeric_lists_as_xyz(self) -> None:
         points, source_count = _points_from_positions([1, 2, 3, 4, 5, 6])
