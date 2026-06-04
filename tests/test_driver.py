@@ -14,6 +14,7 @@ from go2_local_brain.driver.webrtc_client import (
     Go2WebRTCClient,
     _extract_motion_mode_name,
 )
+from go2_local_brain.safety.limits import MAX_VX
 
 
 class _FakeChannel:
@@ -105,7 +106,7 @@ class MovementFeatureTests(unittest.TestCase):
         self.assertTrue(pubsub.published)
         for _topic, payload, _msg_type in pubsub.published:
             param = json.loads(payload["parameter"])
-            self.assertLessEqual(param["x"], 0.75 + 1e-9)
+            self.assertLessEqual(param["x"], MAX_VX + 1e-9)
 
     def test_turn_180_calls_move_with_full_turn_duration(self) -> None:
         client = _make_client_with_fake(_FakePubSub())
