@@ -13,6 +13,8 @@ dependencies = [
     "ollama",
     "rerun-sdk",
     "python-dotenv",
+    "aiohttp",
+    "pillow",
 ]
 
 [tool.setuptools.packages.find]
