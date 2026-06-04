@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "go2-local-brain"
+version = "0.1.0"
+description = "Lightweight local brain for a Unitree Go2 Air: WebRTC control + Ollama tool-calling."
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+    "unitree_webrtc_connect",
+    "ollama",
+    "rerun-sdk",
+    "python-dotenv",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
