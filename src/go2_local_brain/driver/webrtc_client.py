@@ -1,20 +1,4 @@
-"""Thin async wrapper around unitree_webrtc_connect for the Go2 Air.
-
-Design notes
-------------
-* All WebRTC work stays on the asyncio loop. We never block it; every
-  internal call is awaited or non-blocking, and tight refresh loops yield
-  via ``asyncio.sleep``.
-* The upstream package (``unitree_webrtc_connect`` 2.x) doesn't expose a
-  ``SportClient`` - high-level locomotion is sent as JSON-RPC-ish requests
-  over a WebRTC data channel using ``RTC_TOPIC["SPORT_MOD"]`` and the
-  ``SPORT_CMD`` api-id table. We hide that behind high-level methods so the
-  rest of the app doesn't care.
-* Some attribute names (``aes_128_key`` vs ``aesKey``, the data-channel
-  pub/sub attribute, etc.) have varied across upstream releases. Where the
-  cost is small we probe for them at runtime so a minor version bump doesn't
-  break us.
-"""
+"""Thin async wrapper around unitree_webrtc_connect for the Go2 Air."""
 
 from __future__ import annotations
 
@@ -44,14 +28,14 @@ _MOTION_SWITCHER_CHECK_API = 1001
 _MOTION_SWITCHER_SET_API = 1002
 _MOTION_MODE_SETTLE_S = 5.0
 
-# Exploration is intentionally short and telemetry-gated. The Go2 stream Cooper
-# pasted reported range_obstacle=[0,0,0,0], which we treat as unavailable.
 _SPORT_STATE_STALE_S = 1.0
-_EXPLORE_MAX_DURATION_S = 8.0
-_EXPLORE_STEP_S = 0.30
-_EXPLORE_TURN_S = 0.35
-_EXPLORE_VX = 0.25
-_EXPLORE_VYAW = 0.65
+_EXPLORE_STEP_S = 0.35
+_EXPLORE_TURN_S = 0.45
+_EXPLORE_VX = 0.30
+_EXPLORE_VYAW = 0.80
+_TURN_180_VYAW = 1.00
+_TURN_180_DURATION_S = 3.20
+_MAX_SEQUENCE_STEPS = 8
 
 _ADVANCED_ACTIONS: dict[str, list[str]] = {
     "greet": ["Hello"],
@@ -81,6 +65,10 @@ class Go2Config:
     force_motion_mode: Optional[str] = None
     enable_exploration: bool = False
     exploration_min_obstacle_m: float = 0.35
+    # telemetry: require nonzero range_obstacle. relaxed: use it if present,
+    # otherwise continue with short cautious turns/steps. blind: ignore range.
+    exploration_mode: str = "telemetry"
+    exploration_max_duration_s: float = 15.0
 
 
 class Go2WebRTCClient:
@@ -179,7 +167,6 @@ class Go2WebRTCClient:
         log.info("Go2 WebRTC closed")
 
     async def stand_up(self) -> None:
-        """Stand up, then enter BalanceStand so subsequent Move calls are accepted."""
         await self._sport_request("StandUp")
         if "BalanceStand" in self._sport_cmd:
             await asyncio.sleep(_STAND_TO_BALANCE_PAUSE_S)
@@ -187,12 +174,10 @@ class Go2WebRTCClient:
         self._touch()
 
     async def balance_stand(self) -> None:
-        """Put the robot in active balance mode."""
         await self._sport_request("BalanceStand")
         self._touch()
 
     async def recovery_stand(self) -> None:
-        """Attempt the firmware recovery-stand behavior, if present."""
         await self._sport_request_first(["RecoveryStand", "RecoveryStandUp"])
         self._touch()
 
@@ -201,16 +186,93 @@ class Go2WebRTCClient:
         self._touch()
 
     async def advanced_action(self, name: str) -> None:
-        """Run a named gesture/action using whichever SPORT_CMD exists locally."""
-        key = name.strip().lower().replace("-", "_").replace(" ", "_")
+        key = _normalize_action_name(name)
         candidates = _ADVANCED_ACTIONS.get(key)
         if not candidates:
             raise RuntimeError(f"unknown advanced action {name!r}")
         await self._sport_request_first(candidates)
         self._touch()
 
+    async def turn_180(self, direction: str = "left") -> None:
+        """Turn around approximately 180 degrees in place."""
+        sign = -1.0 if direction.strip().lower() in {"right", "clockwise", "cw"} else 1.0
+        await self.move(0.0, 0.0, sign * _TURN_180_VYAW, _TURN_180_DURATION_S)
+
+    async def dance_move(self, style: str = "hype") -> None:
+        """Run a movement-based dance macro, with firmware gestures when present."""
+        key = _normalize_action_name(style)
+        if key in {"spin", "turn"}:
+            await self.sequence([
+                {"cmd": "turn_left", "duration_s": 0.65},
+                {"cmd": "turn_right", "duration_s": 0.65},
+                {"cmd": "turn_180_left"},
+            ])
+        elif key in {"sway", "side"}:
+            await self.sequence([
+                {"cmd": "strafe_left", "duration_s": 0.45},
+                {"cmd": "strafe_right", "duration_s": 0.45},
+                {"cmd": "strafe_right", "duration_s": 0.45},
+                {"cmd": "strafe_left", "duration_s": 0.45},
+            ])
+        else:
+            await self._try_advanced_action("dance")
+            await self.sequence([
+                {"cmd": "walk_turn_left", "duration_s": 0.55},
+                {"cmd": "walk_turn_right", "duration_s": 0.55},
+                {"cmd": "strafe_left", "duration_s": 0.35},
+                {"cmd": "strafe_right", "duration_s": 0.35},
+            ])
+
+    async def sequence(self, steps: list[dict[str, Any]]) -> None:
+        """Execute a short chain of known commands from one model tool call."""
+        if not isinstance(steps, list) or not steps:
+            raise RuntimeError("sequence requires at least one step")
+        for step in steps[:_MAX_SEQUENCE_STEPS]:
+            if not isinstance(step, dict):
+                continue
+            cmd = str(step.get("cmd", "")).strip().lower()
+            duration = float(step.get("duration_s", DEFAULT_MOVE_DURATION_S))
+            duration = min(max(duration, 0.05), 2.5)
+            await self._run_sequence_step(cmd, duration)
+        await self.stop()
+
+    async def _run_sequence_step(self, cmd: str, duration_s: float) -> None:
+        if cmd in {"forward", "walk_forward", "step_forward"}:
+            await self.move(0.45, 0.0, 0.0, duration_s)
+        elif cmd in {"back", "backward", "step_back"}:
+            await self.move(-0.32, 0.0, 0.0, duration_s)
+        elif cmd in {"left", "strafe_left"}:
+            await self.move(0.0, 0.30, 0.0, duration_s)
+        elif cmd in {"right", "strafe_right"}:
+            await self.move(0.0, -0.30, 0.0, duration_s)
+        elif cmd in {"turn_left"}:
+            await self.move(0.0, 0.0, 0.85, duration_s)
+        elif cmd in {"turn_right"}:
+            await self.move(0.0, 0.0, -0.85, duration_s)
+        elif cmd in {"walk_turn_left"}:
+            await self.move(0.35, 0.0, 0.75, duration_s)
+        elif cmd in {"walk_turn_right"}:
+            await self.move(0.35, 0.0, -0.75, duration_s)
+        elif cmd in {"turn_180_left", "turnaround_left"}:
+            await self.turn_180("left")
+        elif cmd in {"turn_180_right", "turnaround_right"}:
+            await self.turn_180("right")
+        elif cmd in _ADVANCED_ACTIONS:
+            await self._try_advanced_action(cmd)
+        elif cmd in {"pause", "wait"}:
+            await asyncio.sleep(duration_s)
+        elif cmd in {"stop"}:
+            await self.stop()
+        else:
+            raise RuntimeError(f"unknown sequence command {cmd!r}")
+
+    async def _try_advanced_action(self, name: str) -> None:
+        try:
+            await self.advanced_action(name)
+        except Exception as exc:  # noqa: BLE001
+            log.info("advanced action %s unavailable: %s", name, exc)
+
     async def stop(self) -> None:
-        """Zero-velocity + cancel any pending move loop. Never raises."""
         await self._cancel_move_task()
         try:
             await self._send_stop_move()
@@ -225,7 +287,6 @@ class Go2WebRTCClient:
         vyaw: float = 0.0,
         duration_s: float = DEFAULT_MOVE_DURATION_S,
     ) -> None:
-        """Drive at the given (clamped) velocity for ``duration_s`` seconds."""
         cvx = clamp(vx, -MAX_VX, MAX_VX)
         cvy = clamp(vy, -MAX_VY, MAX_VY)
         cvyaw = clamp(vyaw, -MAX_VYAW, MAX_VYAW)
@@ -242,41 +303,67 @@ class Go2WebRTCClient:
             )
 
         await self._cancel_move_task()
-        self._move_task = asyncio.create_task(
-            self._move_loop(cvx, cvy, cvyaw, dur), name="go2-move"
-        )
+        self._move_task = asyncio.create_task(self._move_loop(cvx, cvy, cvyaw, dur), name="go2-move")
         try:
             await self._move_task
         except asyncio.CancelledError:
             pass
 
-    async def explore_room(self, duration_s: float = 3.0) -> None:
-        """Take short forward/turn steps while range_obstacle says space is clear.
+    async def explore_room(self, duration_s: float = 3.0, mode: Optional[str] = None) -> None:
+        """Explore with short forward/turn steps.
 
-        Exploration is opt-in and bounded. It refuses to run if sport-state
-        telemetry is stale, missing, or the range array is all zeros.
+        Modes:
+        * telemetry: require fresh nonzero range_obstacle.
+        * relaxed: use range_obstacle if present; otherwise keep moving in small arcs.
+        * blind: ignore range_obstacle entirely.
         """
         if not self._cfg.enable_exploration:
             raise RuntimeError("exploration is disabled; set ENABLE_EXPLORATION=1 to opt in")
-        ranges = self._valid_range_obstacles()
-        if ranges is None:
-            raise RuntimeError("range_obstacle telemetry is unavailable; refusing blind exploration")
+        active_mode = (mode or self._cfg.exploration_mode).strip().lower()
+        if active_mode not in {"telemetry", "relaxed", "blind"}:
+            active_mode = self._cfg.exploration_mode
+        max_duration = min(max(0.0, float(duration_s)), self._cfg.exploration_max_duration_s)
+        if max_duration <= 0.0:
+            return
 
-        deadline = time.monotonic() + min(max(0.0, float(duration_s)), _EXPLORE_MAX_DURATION_S)
+        if active_mode == "telemetry" and self._valid_range_obstacles() is None:
+            raise RuntimeError("range_obstacle telemetry is unavailable; use EXPLORATION_MODE=relaxed or blind to override")
+
+        deadline = time.monotonic() + max_duration
         turn_sign = 1.0
+        step_count = 0
         while time.monotonic() < deadline:
             ranges = self._valid_range_obstacles()
-            if ranges is None:
+            if active_mode == "telemetry" and ranges is None:
                 raise RuntimeError("range_obstacle telemetry went stale during exploration")
 
-            front = ranges[0]
-            closest = min(ranges)
-            if front > self._cfg.exploration_min_obstacle_m and closest > self._cfg.exploration_min_obstacle_m * 0.65:
-                await self.move(_EXPLORE_VX, 0.0, 0.10 * turn_sign, _EXPLORE_STEP_S)
+            if active_mode == "blind" or ranges is None:
+                # Gentle roaming pattern when no obstacle signal is available.
+                turn_sign = -turn_sign if step_count % 4 == 3 else turn_sign
+                await self.move(_EXPLORE_VX, 0.0, 0.25 * turn_sign, _EXPLORE_STEP_S)
             else:
-                turn_sign = self._pick_explore_turn(ranges, turn_sign)
-                await self.move(0.0, 0.0, _EXPLORE_VYAW * turn_sign, _EXPLORE_TURN_S)
+                front = ranges[0]
+                closest = min(ranges)
+                if front > self._cfg.exploration_min_obstacle_m and closest > self._cfg.exploration_min_obstacle_m * 0.65:
+                    await self.move(_EXPLORE_VX, 0.0, 0.10 * turn_sign, _EXPLORE_STEP_S)
+                else:
+                    turn_sign = self._pick_explore_turn(ranges, turn_sign)
+                    await self.move(0.0, 0.0, _EXPLORE_VYAW * turn_sign, _EXPLORE_TURN_S)
+            step_count += 1
         await self.stop()
+
+    def telemetry_report(self) -> str:
+        age = time.monotonic() - self._sport_state_ts if self._sport_state_ts else None
+        ranges = self._valid_range_obstacles()
+        keys = sorted(self._sport_state.keys()) if self._sport_state else []
+        raw_ranges = self._sport_state.get("range_obstacle") if self._sport_state else None
+        age_text = "none" if age is None else f"{age:.2f}s"
+        range_text = "usable" if ranges is not None else "unavailable"
+        return (
+            f"sport_state_age={age_text}; keys={keys}; "
+            f"range_obstacle={raw_ranges}; range_status={range_text}; "
+            "if range_obstacle is all zeros, use lowstate/lidar/obstacle API diagnostics next"
+        )
 
     async def _move_loop(self, vx: float, vy: float, vyaw: float, duration_s: float) -> None:
         deadline = time.monotonic() + duration_s
@@ -320,7 +407,6 @@ class Go2WebRTCClient:
             return
 
     def _publish_move(self, vx: float, vy: float, vyaw: float) -> None:
-        """Fire-and-forget Move at the given velocity."""
         if self._pubsub is None or self._sport_topic is None:
             raise RuntimeError("not connected: call connect() first")
         channel = getattr(self._pubsub, "channel", None)
@@ -384,11 +470,7 @@ class Go2WebRTCClient:
         dc = getattr(conn, "datachannel", None) or getattr(conn, "data_channel", None)
         if dc is None:
             return None
-        return (
-            getattr(dc, "pub_sub", None)
-            or getattr(dc, "pubsub", None)
-            or getattr(dc, "publisher", None)
-        )
+        return getattr(dc, "pub_sub", None) or getattr(dc, "pubsub", None) or getattr(dc, "publisher", None)
 
     async def _await_datachannel_ready(self) -> None:
         dc = getattr(self._conn, "datachannel", None) or getattr(self._conn, "data_channel", None)
@@ -438,10 +520,7 @@ class Go2WebRTCClient:
             return
         try:
             current = await asyncio.wait_for(
-                self._pubsub.publish_request_new(
-                    self._motion_switcher_topic,
-                    {"api_id": _MOTION_SWITCHER_CHECK_API},
-                ),
+                self._pubsub.publish_request_new(self._motion_switcher_topic, {"api_id": _MOTION_SWITCHER_CHECK_API}),
                 timeout=3.0,
             )
         except Exception as exc:  # noqa: BLE001
@@ -468,15 +547,17 @@ class Go2WebRTCClient:
         await asyncio.sleep(_MOTION_MODE_SETTLE_S)
 
 
+def _normalize_action_name(name: str) -> str:
+    return name.strip().lower().replace("-", "_").replace(" ", "_")
+
+
 def _request_msg_type() -> str:
-    """Return the DATA_CHANNEL_TYPE['REQUEST'] string for the installed package."""
     from unitree_webrtc_connect import DATA_CHANNEL_TYPE  # type: ignore
 
     return DATA_CHANNEL_TYPE["REQUEST"]
 
 
 def _extract_motion_mode_name(response: Any) -> Optional[str]:
-    """Pull the current mode name out of a MOTION_SWITCHER query response."""
     import json as _json
 
     if response is None:
@@ -498,7 +579,6 @@ def _extract_motion_mode_name(response: Any) -> Optional[str]:
 
 
 def _build_sport_request(api_id: int, parameter: dict[str, Any]) -> dict[str, Any]:
-    """Build the JSON body the firmware expects for a sport request."""
     import json
     import random
     import time as _t
