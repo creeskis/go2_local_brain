@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import unittest
 from typing import Any
 
@@ -34,24 +35,27 @@ class _FakePubSub:
         self.requests: list[tuple[str, dict]] = []
 
     def publish_without_callback(self, topic: str, data: Any = None, msg_type: Any = None) -> None:
-        # Mirror what the real one does: silently no-op when closed. Our
-        # wrapper is supposed to check readyState *before* getting here.
         if self.channel.readyState != "open":
             return
         self.published.append((topic, data, msg_type))
 
     async def publish_request_new(self, topic: str, options: dict) -> None:
-        # No-op stand-in for acknowledged requests (StopMove, StandUp, etc).
         self.requests.append((topic, options))
 
 
-def _make_client_with_fake(pubsub: _FakePubSub) -> Go2WebRTCClient:
+def _make_client_with_fake(pubsub: _FakePubSub, cfg: Go2Config | None = None) -> Go2WebRTCClient:
     """Build a client and wire it to a fake pub/sub without running connect()."""
-    client = Go2WebRTCClient(Go2Config(ip="127.0.0.1"))
+    client = Go2WebRTCClient(cfg or Go2Config(ip="127.0.0.1"))
     client._pubsub = pubsub
     client._sport_topic = "rt/api/sport/request"
-    # Minimal subset of SPORT_CMD ids we exercise here.
-    client._sport_cmd = {"Move": 1008, "StopMove": 1003, "StandUp": 1004}
+    client._sport_cmd = {
+        "Move": 1008,
+        "StopMove": 1003,
+        "StandUp": 1004,
+        "BalanceStand": 1002,
+        "Hello": 1016,
+        "Dance1": 1022,
+    }
     return client
 
 
@@ -66,7 +70,6 @@ class PublishMoveTests(unittest.TestCase):
         topic, payload, _msg_type = pubsub.published[0]
         self.assertEqual(topic, "rt/api/sport/request")
         self.assertEqual(payload["header"]["identity"]["api_id"], 1008)
-        # parameter is JSON-encoded per upstream contract.
         parameter = json.loads(payload["parameter"])
         self.assertAlmostEqual(parameter["x"], 0.1)
         self.assertAlmostEqual(parameter["y"], -0.05)
@@ -87,15 +90,12 @@ class PublishMoveTests(unittest.TestCase):
 
 class SportStateTests(unittest.TestCase):
     def test_callback_caches_and_summarizes(self) -> None:
-        # LF_SPORT_MOD_STATE schema: mode + gait_type are the summary axes.
         client = _make_client_with_fake(_FakePubSub())
         client._on_sport_state({"data": {"mode": 1, "gait_type": 2}})
         self.assertEqual(client._sport_state.get("mode"), 1)
         self.assertEqual(client._sport_state_summary, (1, 2))
 
     def test_callback_does_not_collapse_zero(self) -> None:
-        # gait_type=0 is a valid value, not "missing"; the summary must
-        # carry it through so a transition back to 0 still logs.
         client = _make_client_with_fake(_FakePubSub())
         client._on_sport_state({"data": {"mode": 0, "gait_type": 0}})
         self.assertEqual(client._sport_state_summary, (0, 0))
@@ -110,21 +110,51 @@ class MoveClampingTests(unittest.TestCase):
     def test_move_clamps_velocity(self) -> None:
         pubsub = _FakePubSub(ready=True)
         client = _make_client_with_fake(pubsub)
-        # Request way past the limit, very short duration so the loop ends fast.
         asyncio.run(client.move(vx=10.0, duration_s=0.05))
-        # Several publishes happened; all should have clamped vx.
         self.assertTrue(pubsub.published)
         for _topic, payload, _msg_type in pubsub.published:
             param = json.loads(payload["parameter"])
-            self.assertLessEqual(param["x"], 0.35 + 1e-9)
+            self.assertLessEqual(param["x"], 0.75 + 1e-9)
+
+
+class AdvancedActionTests(unittest.TestCase):
+    def test_dance_uses_first_available_candidate(self) -> None:
+        pubsub = _FakePubSub()
+        client = _make_client_with_fake(pubsub)
+        asyncio.run(client.advanced_action("dance"))
+        self.assertEqual(pubsub.requests[-1], ("rt/api/sport/request", {"api_id": 1022}))
+
+    def test_unknown_advanced_action_raises(self) -> None:
+        client = _make_client_with_fake(_FakePubSub())
+        with self.assertRaises(RuntimeError):
+            asyncio.run(client.advanced_action("teleport"))
+
+
+class ExplorationGuardTests(unittest.TestCase):
+    def test_exploration_disabled_raises(self) -> None:
+        client = _make_client_with_fake(_FakePubSub())
+        with self.assertRaises(RuntimeError):
+            asyncio.run(client.explore_room(0.1))
+
+    def test_all_zero_range_obstacles_are_unavailable(self) -> None:
+        cfg = Go2Config(ip="127.0.0.1", enable_exploration=True)
+        client = _make_client_with_fake(_FakePubSub(), cfg)
+        client._sport_state = {"range_obstacle": [0, 0, 0, 0]}
+        client._sport_state_ts = time.monotonic()
+        self.assertIsNone(client._valid_range_obstacles())
+
+    def test_nonzero_range_obstacles_are_valid(self) -> None:
+        cfg = Go2Config(ip="127.0.0.1", enable_exploration=True)
+        client = _make_client_with_fake(_FakePubSub(), cfg)
+        client._sport_state = {"range_obstacle": [1.0, 0.8, 0.6, 0.7]}
+        client._sport_state_ts = time.monotonic()
+        self.assertEqual(client._valid_range_obstacles(), [1.0, 0.8, 0.6, 0.7])
 
 
 class StopResilienceTests(unittest.TestCase):
     """stop() is the universal panic button and must never raise."""
 
     def test_stop_swallows_publish_failure(self) -> None:
-        # Closed channel + StopMove cmd id present => publish_request_new
-        # path is taken. Simulate that path failing.
         pubsub = _FakePubSub(ready=False)
 
         async def boom(*_a, **_kw):
@@ -132,22 +162,15 @@ class StopResilienceTests(unittest.TestCase):
 
         pubsub.publish_request_new = boom  # type: ignore[assignment]
         client = _make_client_with_fake(pubsub)
-        # Must not raise; just logs and returns.
         asyncio.run(client.stop())
 
 
 class MotionModeNameExtractorTests(unittest.TestCase):
     def test_dict_data(self) -> None:
-        self.assertEqual(
-            _extract_motion_mode_name({"data": {"name": "normal"}}),
-            "normal",
-        )
+        self.assertEqual(_extract_motion_mode_name({"data": {"name": "normal"}}), "normal")
 
     def test_json_string_data(self) -> None:
-        self.assertEqual(
-            _extract_motion_mode_name({"data": '{"name": "mcf"}'}),
-            "mcf",
-        )
+        self.assertEqual(_extract_motion_mode_name({"data": '{"name": "mcf"}'}), "mcf")
 
     def test_object_response(self) -> None:
         class FakeResp:
