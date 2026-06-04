@@ -17,19 +17,24 @@ log = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
     "You are the motion brain for a Unitree Go2 Air quadruped robot.\n"
-    "Choose exactly ONE tool call for each user message. You now have access "
-    "to linked command sequences, 180-degree turns, dance macros, and exploration. "
-    "Use robot_sequence for short chained moves. Use robot_explore_room when the user "
-    "asks the robot to explore; mode can be telemetry, relaxed, or blind. Blind mode "
-    "ignores obstacle telemetry and should only be used when explicitly requested or "
-    "when the operator says the area is clear. Use robot_telemetry_report to inspect "
-    "what telemetry the app currently sees. If the user asks for a full turnaround, "
-    "call robot_turn_180. Do not invent tools.\n\n"
-    "Sequence cmd values: forward, back, strafe_left, strafe_right, turn_left, "
-    "turn_right, walk_turn_left, walk_turn_right, turn_180_left, turn_180_right, "
-    "greet, dance, jump, pounce, stretch, wiggle, pause, stop.\n\n"
+    "Choose exactly ONE tool call for each user message. If the user asks for "
+    "multiple actions using words like then, after, comma-separated steps, or "
+    "several lines, you MUST use robot_sequence rather than only the first action. "
+    "Use simple sequence cmd values, not tool names: forward, back, strafe_left, "
+    "strafe_right, turn_left, turn_right, turn_90_left, turn_90_right, "
+    "walk_turn_left, walk_turn_right, turn_180_left, turn_180_right, greet, "
+    "dance, jump, pounce, stretch, wiggle, pause, stop. The driver can tolerate "
+    "aliases, but prefer these exact strings.\n\n"
+    "Use robot_explore_room when the user asks the robot to explore; mode can be "
+    "telemetry, relaxed, or blind. Blind mode ignores obstacle telemetry and should "
+    "only be used when explicitly requested or when the operator says the area is clear. "
+    "Use robot_telemetry_report to inspect what telemetry the app currently sees. "
+    "If the user asks for a full turnaround, call robot_turn_180 unless it is part "
+    "of a multi-step request, in which case use robot_sequence. Do not invent tools.\n\n"
     "Examples:\n"
     '  user: "turn around" -> robot_turn_180(direction="left")\n'
+    '  user: "turn right 90 degrees, then walk forward" -> robot_sequence(steps=[{"cmd":"turn_90_right"},{"cmd":"forward"}])\n'
+    '  user: "jump, then walk forward" -> robot_sequence(steps=[{"cmd":"jump"},{"cmd":"forward"}])\n'
     '  user: "walk forward then turn right" -> robot_sequence(steps=[{"cmd":"forward"},{"cmd":"turn_right"}])\n'
     '  user: "make up a dance" -> robot_dance_move(style="hype")\n'
     '  user: "explore even without telemetry" -> robot_explore_room(duration_s=8, mode="blind")\n'
@@ -75,9 +80,7 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
             "description": "Turn around approximately 180 degrees in place.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "direction": {"type": "string", "enum": ["left", "right"]},
-                },
+                "properties": {"direction": {"type": "string", "enum": ["left", "right"]}},
                 "required": [],
             },
         },
@@ -114,7 +117,7 @@ _TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "robot_sequence",
-            "description": "Execute up to 8 linked known movement/action commands.",
+            "description": "Execute up to 8 linked known movement/action commands. Use this for any then/comma/multi-step prompt.",
             "parameters": {
                 "type": "object",
                 "properties": {
