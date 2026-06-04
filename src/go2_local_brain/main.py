@@ -44,6 +44,8 @@ async def _amain() -> int:
             ip=cfg.go2_ip,
             aes_128_key=cfg.go2_aes_128_key,
             force_motion_mode=cfg.force_motion_mode,
+            enable_exploration=cfg.enable_exploration,
+            exploration_min_obstacle_m=cfg.exploration_min_obstacle_m,
         )
     )
 
