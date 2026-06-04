@@ -13,14 +13,7 @@ from .driver.webrtc_client import Go2Config, Go2WebRTCClient
 
 
 def _configure_logging() -> None:
-    """Keep robot-brain logs visible without flooding the REPL.
-
-    unitree_webrtc_connect logs every incoming sport-state packet via the
-    root logger at INFO. That is useful while debugging WebRTC, but it makes
-    the prompt nearly unusable once telemetry starts streaming. By default we
-    keep third-party/root logs at WARNING and our package logs at INFO.
-    Set VERBOSE_WEBRTC_LOGS=1 to restore full upstream INFO logging.
-    """
+    """Keep robot-brain logs visible without flooding the REPL."""
     verbose = os.getenv("VERBOSE_WEBRTC_LOGS", "").strip().lower() in {
         "1",
         "true",
@@ -46,13 +39,11 @@ async def _amain() -> int:
             force_motion_mode=cfg.force_motion_mode,
             enable_exploration=cfg.enable_exploration,
             exploration_min_obstacle_m=cfg.exploration_min_obstacle_m,
+            exploration_mode=cfg.exploration_mode,
+            exploration_max_duration_s=cfg.exploration_max_duration_s,
         )
     )
 
-    # One try/finally around both connect() and repl() so a partial
-    # connect still gets torn down (the upstream package opens a peer
-    # connection during connect() before the data-channel handshake;
-    # leaking it leaves WebRTC sessions on the robot side).
     try:
         try:
             await client.connect()
@@ -63,7 +54,6 @@ async def _amain() -> int:
         try:
             await brain.repl()
         except KeyboardInterrupt:
-            # User hit Ctrl-C; fall through to clean shutdown.
             pass
     finally:
         await client.close()
