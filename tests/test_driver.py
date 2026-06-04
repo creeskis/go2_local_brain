@@ -53,6 +53,10 @@ def _make_client_with_fake(pubsub: _FakePubSub, cfg: Go2Config | None = None) ->
         "BalanceStand": 1002,
         "Hello": 1016,
         "Dance1": 1022,
+        "Handstand": 1301,
+    }
+    client._sport_cmd_mcf = {
+        "HandStand": 2044,
         "BackStand": 2050,
     }
     return client
@@ -154,7 +158,13 @@ class AdvancedActionTests(unittest.TestCase):
         pubsub = _FakePubSub()
         client = _make_client_with_fake(pubsub)
         asyncio.run(client.advanced_action("backstand"))
-        self.assertEqual(pubsub.requests[-1], ("rt/api/sport/request", {"api_id": 2050}))
+        self.assertEqual(pubsub.requests[-1], ("rt/api/sport/request", {"api_id": 2050, "parameter": {"data": True}}))
+
+    def test_handstand_prefers_mcf_toggle_candidate(self) -> None:
+        pubsub = _FakePubSub()
+        client = _make_client_with_fake(pubsub)
+        asyncio.run(client.advanced_action("handstand"))
+        self.assertEqual(pubsub.requests[-1], ("rt/api/sport/request", {"api_id": 2044, "parameter": {"data": True}}))
 
     def test_unknown_advanced_action_raises(self) -> None:
         client = _make_client_with_fake(_FakePubSub())
