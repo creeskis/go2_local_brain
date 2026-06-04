@@ -20,6 +20,27 @@ class AppConfig:
     # None to skip - Cooper's custom 1.1.7 package may already pick the
     # right mode and we don't want to fight it by default.
     force_motion_mode: str | None
+    # Exploration is off by default. It must be explicitly enabled because it
+    # can initiate multiple autonomous move/turn steps from one prompt.
+    enable_exploration: bool
+    exploration_min_obstacle_m: float
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def load_config() -> AppConfig:
@@ -44,4 +65,6 @@ def load_config() -> AppConfig:
         go2_aes_128_key=aes_key,
         ollama_model=ollama_model,
         force_motion_mode=force_mode,
+        enable_exploration=_env_bool("ENABLE_EXPLORATION", default=False),
+        exploration_min_obstacle_m=max(0.1, _env_float("EXPLORATION_MIN_OBSTACLE_M", 0.35)),
     )
