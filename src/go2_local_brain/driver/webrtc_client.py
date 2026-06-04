@@ -37,22 +37,22 @@ _TURN_180_VYAW = 1.00
 _TURN_180_DURATION_S = 3.20
 _MAX_SEQUENCE_STEPS = 8
 
-_ADVANCED_ACTIONS: dict[str, list[str]] = {
-    "greet": ["Hello"],
-    "hello": ["Hello"],
-    "dance": ["Dance1", "Dance2", "WiggleHips"],
-    "dance1": ["Dance1"],
-    "dance2": ["Dance2"],
-    "jump": ["FrontJump", "FreeJump"],
-    "pounce": ["FrontPounce", "Pounce"],
-    "stretch": ["Stretch"],
-    "wiggle": ["WiggleHips"],
-    "heart": ["FingerHeart", "Heart"],
-    "bound": ["Bound", "FreeBound"],
-    "handstand": ["Handstand", "HandStand"],
-    "backstand": ["BackStand"],
-    "moonwalk": ["MoonWalk"],
-    "wallow": ["Wallow"],
+_ADVANCED_ACTIONS: dict[str, list[tuple[str, Optional[dict[str, Any]]]]] = {
+    "greet": [("Hello", None)],
+    "hello": [("Hello", None)],
+    "dance": [("Dance1", None), ("Dance2", None), ("WiggleHips", None)],
+    "dance1": [("Dance1", None)],
+    "dance2": [("Dance2", None)],
+    "jump": [("FrontJump", None), ("FreeJump", {"data": True})],
+    "pounce": [("FrontPounce", None), ("Pounce", None)],
+    "stretch": [("Stretch", None)],
+    "wiggle": [("WiggleHips", None)],
+    "heart": [("Heart", None), ("FingerHeart", None)],
+    "bound": [("FreeBound", {"data": True}), ("Bound", None)],
+    "handstand": [("HandStand", {"data": True}), ("Handstand", None)],
+    "backstand": [("BackStand", {"data": True})],
+    "moonwalk": [("MoonWalk", None)],
+    "wallow": [("Wallow", None)],
 }
 
 _SEQUENCE_ALIASES: dict[str, str] = {
@@ -131,6 +131,7 @@ class Go2WebRTCClient:
         self._sport_state_topic: Optional[str] = None
         self._motion_switcher_topic: Optional[str] = None
         self._sport_cmd: dict[str, int] = {}
+        self._sport_cmd_mcf: dict[str, int] = {}
 
         self._last_cmd_ts: float = 0.0
         self._deadman_task: Optional[asyncio.Task[None]] = None
@@ -178,8 +179,11 @@ class Go2WebRTCClient:
         self._sport_topic = RTC_TOPIC["SPORT_MOD"]
         self._sport_state_topic = RTC_TOPIC.get("LF_SPORT_MOD_STATE") or RTC_TOPIC.get("SPORT_MOD_STATE")
         self._motion_switcher_topic = RTC_TOPIC.get("MOTION_SWITCHER")
-        self._sport_cmd = _merge_sport_cmds(SPORT_CMD, SPORT_CMD_MCF)
+        self._sport_cmd = dict(SPORT_CMD)
+        self._sport_cmd_mcf = dict(SPORT_CMD_MCF)
         if "BackStand" in self._sport_cmd:
+            log.info("advanced MCF sport actions available")
+        elif "BackStand" in self._sport_cmd_mcf:
             log.info("advanced MCF sport actions available")
 
         if self._cfg.force_motion_mode:
@@ -233,11 +237,11 @@ class Go2WebRTCClient:
         self._touch()
 
     async def recovery_stand(self) -> None:
-        await self._sport_request_first(["RecoveryStand", "RecoveryStandUp"])
+        await self._sport_request_first(_action_candidates("RecoveryStand", "RecoveryStandUp"))
         self._touch()
 
     async def sit_down(self) -> None:
-        await self._sport_request_first(["StandDown", "Sit"])
+        await self._sport_request_first(_action_candidates("StandDown", "Sit"))
         self._touch()
 
     async def advanced_action(self, name: str) -> None:
@@ -475,7 +479,7 @@ class Go2WebRTCClient:
         if api_id is None:
             raise RuntimeError("SPORT_CMD['Move'] missing from package")
         payload = _build_sport_request(api_id, {"x": float(vx), "y": float(vy), "z": float(vyaw)})
-        self._pubsub.publish_without_callback(self._sport_topic, payload, _request_msg_type())
+        self._pubsub.publish_without_callback(self._sport_topic, payload)
 
     async def _send_stop_move(self) -> None:
         api_id = self._sport_cmd.get("StopMove")
@@ -485,19 +489,27 @@ class Go2WebRTCClient:
         async with self._lock:
             await self._pubsub.publish_request_new(self._sport_topic, {"api_id": api_id})
 
-    async def _sport_request(self, cmd_name: str) -> None:
-        api_id = self._sport_cmd.get(cmd_name)
+    async def _sport_request(self, cmd_name: str, parameter: Optional[dict[str, Any]] = None, *, mcf: bool = False) -> None:
+        table = self._sport_cmd_mcf if mcf else self._sport_cmd
+        api_id = table.get(cmd_name)
         if api_id is None:
             raise RuntimeError(f"SPORT_CMD[{cmd_name!r}] missing from package")
+        payload = {"api_id": api_id}
+        if parameter is not None:
+            payload["parameter"] = parameter
         async with self._lock:
-            await self._pubsub.publish_request_new(self._sport_topic, {"api_id": api_id})
+            await self._pubsub.publish_request_new(self._sport_topic, payload)
 
-    async def _sport_request_first(self, candidates: list[str]) -> None:
-        for name in candidates:
-            if name in self._sport_cmd:
-                await self._sport_request(name)
+    async def _sport_request_first(self, candidates: list[tuple[str, Optional[dict[str, Any]]]]) -> None:
+        for name, parameter in candidates:
+            if name in self._sport_cmd_mcf:
+                await self._sport_request(name, parameter, mcf=True)
                 return
-        raise RuntimeError(f"none of {candidates} are in SPORT_CMD")
+            if name in self._sport_cmd:
+                await self._sport_request(name, parameter)
+                return
+        names = [name for name, _parameter in candidates]
+        raise RuntimeError(f"none of {names} are in SPORT_CMD or SPORT_CMD_MCF")
 
     def _valid_range_obstacles(self) -> Optional[list[float]]:
         if not self._sport_state or time.monotonic() - self._sport_state_ts > _SPORT_STATE_STALE_S:
@@ -615,6 +627,10 @@ def _merge_sport_cmds(base: dict[str, int], *extras: dict[str, int]) -> dict[str
     return merged
 
 
+def _action_candidates(*names: str) -> list[tuple[str, Optional[dict[str, Any]]]]:
+    return [(name, None) for name in names]
+
+
 def _normalize_action_name(name: str) -> str:
     return name.strip().lower().replace("-", "_").replace(" ", "_")
 
@@ -674,6 +690,10 @@ def _build_sport_request(api_id: int, parameter: dict[str, Any]) -> dict[str, An
 
     generated_id = int(_t.time() * 1000) % 2147483648 + random.randint(0, 1000)
     return {
-        "header": {"identity": {"id": generated_id, "api_id": api_id}},
+        "header": {
+            "identity": {"id": generated_id, "api_id": api_id},
+            "policy": {"priority": 0, "noreply": True},
+        },
         "parameter": json.dumps(parameter),
+        "binary": [],
     }
