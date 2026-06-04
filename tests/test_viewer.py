@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from go2_local_brain.viewer import _decimate, _lidar_payload_from_message, _xyz_triplets
+from go2_local_brain.viewer import _coerce_position_values, _decimate, _lidar_payload_from_message, _xyz_triplets
 
 
 class LidarPayloadTests(unittest.TestCase):
@@ -26,6 +26,20 @@ class LidarPayloadTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload["points"], [[1.0, 2.0, 3.0]])
+
+    def test_lidar_payload_accepts_numpy_like_positions(self) -> None:
+        class FakeArray:
+            def tolist(self) -> list[int]:
+                return [1, 2, 3, 4, 5, 6]
+
+        message = {"data": {"stamp": 123, "data": {"positions": FakeArray()}}}
+        payload = _lidar_payload_from_message(message, max_points=10)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["points"], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+
+    def test_coerce_positions_accepts_bytearray(self) -> None:
+        self.assertEqual(_coerce_position_values(bytearray([1, 2, 3])), [1, 2, 3])
 
     def test_decimate_caps_point_count(self) -> None:
         points = [[float(i), 0.0, 0.0] for i in range(10)]

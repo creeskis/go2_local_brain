@@ -235,10 +235,11 @@ def _jpeg_from_frame(frame: Any) -> bytes:
 
 def _lidar_payload_from_message(message: Any, *, max_points: int = _MAX_LIDAR_POINTS) -> dict[str, Any] | None:
     data, positions = _extract_lidar_positions(message)
-    if not isinstance(positions, list) or len(positions) < 3:
+    values = _coerce_position_values(positions)
+    if values is None or len(values) < 3:
         return None
 
-    points = _xyz_triplets(positions)
+    points = _xyz_triplets(values)
     if not points:
         return None
     points = _decimate(points, max_points)
@@ -247,7 +248,7 @@ def _lidar_payload_from_message(message: Any, *, max_points: int = _MAX_LIDAR_PO
         "points": points,
         "distances": distances,
         "point_count": len(points),
-        "source_point_count": len(positions) // 3,
+        "source_point_count": len(values) // 3,
         "stamp": data.get("stamp") if isinstance(data, dict) else None,
     }
 
@@ -266,6 +267,28 @@ def _extract_lidar_positions(message: Any) -> tuple[dict[str, Any], Any]:
     if "positions" in data:
         return data, data.get("positions")
     return data, None
+
+
+def _coerce_position_values(positions: Any) -> list[Any] | None:
+    """Convert decoder outputs such as NumPy arrays into a plain sequence."""
+    if positions is None:
+        return None
+    if isinstance(positions, list):
+        return positions
+    if isinstance(positions, tuple):
+        return list(positions)
+    if isinstance(positions, (bytes, bytearray)):
+        return list(positions)
+
+    tolist = getattr(positions, "tolist", None)
+    if callable(tolist):
+        values = tolist()
+        if isinstance(values, list):
+            return values
+    try:
+        return list(positions)
+    except TypeError:
+        return None
 
 
 def _xyz_triplets(values: list[Any]) -> list[list[float]]:
