@@ -13,6 +13,7 @@ from go2_local_brain.driver.webrtc_client import (
     Go2Config,
     Go2WebRTCClient,
     _extract_motion_mode_name,
+    _merge_sport_cmds,
 )
 from go2_local_brain.safety.limits import MAX_VX
 
@@ -52,6 +53,7 @@ def _make_client_with_fake(pubsub: _FakePubSub, cfg: Go2Config | None = None) ->
         "BalanceStand": 1002,
         "Hello": 1016,
         "Dance1": 1022,
+        "BackStand": 2050,
     }
     return client
 
@@ -134,12 +136,25 @@ class MovementFeatureTests(unittest.TestCase):
         client.stop.assert_awaited()
 
 
+class SportCommandMergeTests(unittest.TestCase):
+    def test_mcf_commands_are_added_without_overriding_base_ids(self) -> None:
+        merged = _merge_sport_cmds({"Move": 1008}, {"Move": 9999, "BackStand": 2050})
+        self.assertEqual(merged["Move"], 1008)
+        self.assertEqual(merged["BackStand"], 2050)
+
+
 class AdvancedActionTests(unittest.TestCase):
     def test_dance_uses_first_available_candidate(self) -> None:
         pubsub = _FakePubSub()
         client = _make_client_with_fake(pubsub)
         asyncio.run(client.advanced_action("dance"))
         self.assertEqual(pubsub.requests[-1], ("rt/api/sport/request", {"api_id": 1022}))
+
+    def test_backstand_uses_mcf_candidate(self) -> None:
+        pubsub = _FakePubSub()
+        client = _make_client_with_fake(pubsub)
+        asyncio.run(client.advanced_action("backstand"))
+        self.assertEqual(pubsub.requests[-1], ("rt/api/sport/request", {"api_id": 2050}))
 
     def test_unknown_advanced_action_raises(self) -> None:
         client = _make_client_with_fake(_FakePubSub())
