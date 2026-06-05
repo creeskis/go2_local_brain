@@ -209,6 +209,11 @@ python -m go2_local_brain.wasd_video_gui --host 0.0.0.0 --port 8773
 python -m go2_local_brain.ai_wasd_lidar_gui --host 0.0.0.0 --port 8774
 ```
 
+The WASD modules include a locomotion mode panel. Use `Normal` before switching between experiments. `Hind Walk`
+uses `WalkUpright`, `BackStand` attempts the firmware `BackStand` command, `HandStand` toggles `HandStand`,
+and `Bound` / `Jump` toggle `FreeBound` / `FreeJump`; WASD movement continues through the standard `Move` command
+after the selected mode is active.
+
 Good startup prompts:
 
 ```text

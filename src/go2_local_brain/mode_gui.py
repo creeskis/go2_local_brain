@@ -24,6 +24,62 @@ _LIDAR_ARRAY_TOPIC = "rt/utlidar/voxel_map_compressed"
 _MAX_LIDAR_POINTS = 1200
 _LIDAR_SEND_PERIOD_S = 0.25
 _MOVE_DURATION_S = 0.32
+_MODE_SETTLE_S = 0.25
+
+_MOTION_MODE_COMMANDS: dict[str, list[tuple[str, dict[str, Any] | None]]] = {
+    "normal": [
+        ("HandStand", {"data": False}),
+        ("FreeBound", {"data": False}),
+        ("FreeJump", {"data": False}),
+        ("FreeAvoid", {"data": False}),
+        ("WalkUpright", {"data": False}),
+        ("CrossStep", {"data": False}),
+        ("ClassicWalk", {"data": False}),
+        ("BalanceStand", None),
+    ],
+    "hind_walk": [
+        ("HandStand", {"data": False}),
+        ("FreeBound", {"data": False}),
+        ("FreeJump", {"data": False}),
+        ("CrossStep", {"data": False}),
+        ("WalkUpright", {"data": True}),
+    ],
+    "backstand": [
+        ("HandStand", {"data": False}),
+        ("WalkUpright", {"data": True}),
+        ("BackStand", {"data": True}),
+    ],
+    "handstand": [
+        ("WalkUpright", {"data": False}),
+        ("FreeBound", {"data": False}),
+        ("FreeJump", {"data": False}),
+        ("HandStand", {"data": True}),
+    ],
+    "bound": [
+        ("HandStand", {"data": False}),
+        ("WalkUpright", {"data": False}),
+        ("FreeJump", {"data": False}),
+        ("FreeBound", {"data": True}),
+    ],
+    "jump": [
+        ("HandStand", {"data": False}),
+        ("WalkUpright", {"data": False}),
+        ("FreeBound", {"data": False}),
+        ("FreeJump", {"data": True}),
+    ],
+    "classic": [
+        ("WalkUpright", {"data": False}),
+        ("ClassicWalk", {"data": True}),
+    ],
+    "cross_step": [
+        ("WalkUpright", {"data": False}),
+        ("CrossStep", {"data": True}),
+    ],
+    "free_walk": [("FreeWalk", None)],
+    "static_walk": [("StaticWalk", None)],
+    "trot_run": [("TrotRun", None)],
+    "economic": [("EconomicGait", None)],
+}
 
 
 @dataclass(frozen=True)
@@ -61,6 +117,7 @@ class ModeGui:
         self._last_lidar_error = ""
         self._status = "starting"
         self._last_result = ""
+        self._active_motion_mode = "normal"
 
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -87,6 +144,7 @@ class ModeGui:
             app.router.add_post("/api/ai", self._ai_action)
         if self._mode.enable_keyboard:
             app.router.add_post("/api/move", self._move_action)
+            app.router.add_post("/api/mode", self._mode_action)
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -271,6 +329,28 @@ class ModeGui:
         await self._broadcast_status()
         return web.json_response({"ok": True, "result": result})
 
+    async def _mode_action(self, request: web.Request) -> web.Response:
+        if self._client is None:
+            return web.json_response({"ok": False, "result": "client is not connected"}, status=503)
+        payload = await _json_or_empty(request)
+        mode = str(payload.get("mode", "")).strip()
+        commands = _MOTION_MODE_COMMANDS.get(mode)
+        if commands is None:
+            return web.json_response({"ok": False, "result": f"unknown mode {mode!r}"}, status=400)
+        try:
+            await self._client.stop()
+            for name, parameter in commands:
+                await self._client.sport_command(name, parameter)
+                await asyncio.sleep(_MODE_SETTLE_S)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("motion mode failed: %s", mode)
+            await self._safe_stop()
+            return web.json_response({"ok": False, "result": f"{mode} failed at {name}: {exc}"}, status=400)
+        self._active_motion_mode = mode
+        self._last_result = f"mode: {mode}"
+        await self._broadcast_status()
+        return web.json_response({"ok": True, "result": self._last_result})
+
     async def _stop_action(self, _request: web.Request) -> web.Response:
         await self._safe_stop()
         self._last_result = "stop"
@@ -307,6 +387,7 @@ class ModeGui:
             "lidar_dropped": self._lidar_dropped,
             "last_lidar_error": self._last_lidar_error,
             "last_result": self._last_result,
+            "motion_mode": self._active_motion_mode,
         }
 
 
@@ -380,6 +461,21 @@ _DRIVE_PANEL = """
       </div>
       <label>Speed <input id="speed" type="range" min="0.10" max="0.75" step="0.05" value="0.45"></label>
       <label>Turn <input id="turn" type="range" min="0.20" max="1.10" step="0.05" value="0.85"></label>
+      <h2>Locomotion Mode</h2>
+      <div class="grid modegrid">
+        <button data-mode="normal">Normal</button>
+        <button data-mode="hind_walk">Hind Walk</button>
+        <button data-mode="backstand">BackStand</button>
+        <button data-mode="handstand">HandStand</button>
+        <button data-mode="bound">Bound</button>
+        <button data-mode="jump">Jump</button>
+        <button data-mode="classic">Classic</button>
+        <button data-mode="cross_step">CrossStep</button>
+        <button data-mode="free_walk">FreeWalk</button>
+        <button data-mode="static_walk">StaticWalk</button>
+        <button data-mode="trot_run">TrotRun</button>
+        <button data-mode="economic">Economic</button>
+      </div>
 """
 
 _KEYBOARD_HIDDEN_INPUTS = """
@@ -415,9 +511,11 @@ __THREE_SCRIPTS__
     button, input, textarea { font:inherit; }
     button { border:1px solid #3c4652; background:#242a31; color:#f1f1f1; border-radius:6px; padding:9px 10px; cursor:pointer; min-height:36px; }
     button:hover { background:#303843; }
+    button.active { border-color:#78b7ff; background:#19354f; }
     .stop { background:var(--danger); border-color:#b72b3d; }
     .grid { display:grid; gap:8px; }
     .drive { grid-template-columns:repeat(3, 1fr); }
+    .modegrid { grid-template-columns:repeat(2, 1fr); }
     .wide { width:100%; margin-top:8px; }
     textarea { width:100%; min-height:76px; resize:vertical; border:1px solid #3c4652; background:#0e1012; color:#fff; border-radius:6px; padding:8px; }
     label { display:grid; gap:5px; font-size:12px; color:#b6bec8; margin-top:8px; }
@@ -461,8 +559,9 @@ __KEYBOARD_JS__
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
       if (msg.type === "status") {
-        document.getElementById("status").textContent = `${msg.status} video=${msg.video_frames} lidar=${msg.lidar_messages}`;
+        document.getElementById("status").textContent = `${msg.status} video=${msg.video_frames} lidar=${msg.lidar_messages} mode=${msg.motion_mode}`;
         if (msg.last_result) resultEl.textContent = msg.last_result;
+        document.querySelectorAll("[data-mode]").forEach((button) => button.classList.toggle("active", button.dataset.mode === msg.motion_mode));
         const dbg = document.getElementById("lidarDebug");
         if (dbg) dbg.textContent = `raw=${msg.lidar_raw_messages} rendered=${msg.lidar_messages} parseErrors=${msg.lidar_parse_errors} dropped=${msg.lidar_dropped}`;
         if (msg.last_lidar_error) resultEl.textContent = `LiDAR parse shape: ${msg.last_lidar_error}`;
@@ -520,6 +619,14 @@ _KEYBOARD_JS = """
       button.addEventListener("mouseleave", () => release(name));
       button.addEventListener("touchstart", (e) => { e.preventDefault(); hold(name); });
       button.addEventListener("touchend", (e) => { e.preventDefault(); release(name); });
+    });
+    document.querySelectorAll("[data-mode]").forEach((button) => {
+      button.addEventListener("click", () => {
+        active.clear();
+        clearInterval(tick);
+        tick = null;
+        api("/api/mode", {mode: button.dataset.mode}).catch(() => {});
+      });
     });
     const keyMap = {w:"forward", s:"back", a:"left", d:"right", q:"turnLeft", e:"turnRight"};
     document.addEventListener("keydown", (e) => {
