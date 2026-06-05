@@ -193,6 +193,22 @@ python -m go2_local_brain.control_gui --host 0.0.0.0 --port 8770
 
 Open `http://localhost:8770`. This GUI does not start AI or LiDAR.
 
+Four feature-specific browser modules are also available:
+
+```bash
+# 1. AI CLI + video, with WASD/QE keyboard commands enabled but no visible drive panel.
+python -m go2_local_brain.ai_cli_video_gui --host 0.0.0.0 --port 8771
+
+# 2. AI CLI + video + LiDAR, without WASD controls.
+python -m go2_local_brain.ai_lidar_gui --host 0.0.0.0 --port 8772
+
+# 3. WASD/QE keyboard controller + video, without AI or LiDAR.
+python -m go2_local_brain.wasd_video_gui --host 0.0.0.0 --port 8773
+
+# 4. AI CLI + WASD/QE keyboard controller + video + LiDAR.
+python -m go2_local_brain.ai_wasd_lidar_gui --host 0.0.0.0 --port 8774
+```
+
 Good startup prompts:
 
 ```text
