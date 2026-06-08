@@ -50,7 +50,7 @@ class HumanFollowController:
         self,
         mover: FollowMover,
         *,
-        target_height: float = 0.60,
+        target_height: float = 0.80,
         deadband: float = 0.12,
         max_forward: float = 1.15,
         max_turn: float = 0.55,
