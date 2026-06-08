@@ -37,7 +37,7 @@ class AutonomySupervisor:
         navigator: AutonomyNavigator,
         perception: PerceptionProvider,
         *,
-        tick_s: float = 0.8,
+        tick_s: float = 0.15,
         max_events: int = 80,
     ) -> None:
         self._map = patrol_map
