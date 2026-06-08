@@ -1,7 +1,7 @@
 """Motion caps + a deadman timeout, shared by driver and brain.
 
 These are still bounded in the driver, but they are no longer desk-test tiny.
-Cooper verified WebRTC movement on hardware, so the normal prompt path can use
+WebRTC movement has been verified on hardware, so the normal prompt path can use
 snappier walking, strafing, and turning while keeping short command windows.
 """
 

@@ -204,7 +204,7 @@ It should not own raw continuous velocity. The Python supervisor can enforce:
 
 ## Next Implementation Targets
 
-1. Add pose-topic integration from Claude's `claude/ai-mode-prep` branch after hardware probing.
+1. Add pose-topic integration after hardware probing.
 2. Add a planner class that can ask Ollama for high-level choices from compact observations.
 3. Add visual landmark localization so waypoints become less approximate.
 4. Add no-go-zone enforcement.
