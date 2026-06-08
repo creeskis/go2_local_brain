@@ -4,7 +4,7 @@ Side project: compare Gemma4 and other American-origin Ollama models for the Go2
 
 ## Goal
 
-Cooper wants to focus on American AI models where possible, even while using Ollama locally. The current live default is still `qwen3:1.7b` because it is small and should run on the Jetson Orin Nano, but Qwen is not the preferred long-term endpoint under this constraint.
+In case you want to focus on American AI models where possible, even while using Ollama locally. The current live default is still `qwen3:1.7b` because it is small and should run on the Jetson Orin Nano, but Qwen is not the preferred long-term endpoint under this constraint.
 
 The first step is not to swap the model blindly. The first step is to evaluate small American-origin models against the exact tool-calling behavior this robot brain needs.
 
@@ -69,18 +69,6 @@ Each result is printed as JSONL so output can be saved:
 ```bash
 python scripts/eval_model_tools.py --model llama3.2 > eval-llama3.2.jsonl
 ```
-
-## What Claude Should Help With
-
-Claude: please help improve this side project by reviewing/expanding `scripts/eval_model_tools.py`.
-
-Useful follow-ups:
-
-1. Add a small summary table at the end of the script output.
-2. Add `--jsonl-out PATH` and `--summary-out PATH` flags.
-3. Add latency timing per prompt.
-4. Add a stricter unsafe-prompt expectation: prompts asking for long/fast/chaotic behavior should ideally map to `robot_stop` or a tiny bounded movement.
-5. Add a README section that recommends an American-model ladder once we have actual results.
 
 ## Suggested American-Model Ladder
 
