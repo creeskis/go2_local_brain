@@ -22,7 +22,7 @@ class AutonomyNavigator:
         self._client = client
 
     async def move_toward(self, waypoint: Waypoint) -> str:
-        """Take one short step toward a waypoint by tracking live pose delta."""
+        """Take one smooth step toward a waypoint by blending forward and turning vectors."""
         # 1. Safely extract live coordinate position and heading from telemetry cache
         sport_state = getattr(self._client, "_sport_state", None) or getattr(self._client, "sport_state", None)
         
@@ -43,7 +43,6 @@ class AutonomyNavigator:
                 if len(rpy) >= 3:
                     current_yaw = rpy[2]
             
-            # Extract the raw hardware obstacle range metrics (in meters)
             range_obstacle = sport_state.get("range_obstacle", [0.0, 0.0, 0.0, 0.0])
 
         # 2. Calculate absolute world delta gaps
@@ -64,23 +63,32 @@ class AutonomyNavigator:
 
         # 5. Compute true relative steering error
         yaw_error = math.atan2(dy_local, dx_local)
-        if abs(yaw_error) > 0.35:
-            # Dynamically steer toward the target spot based on current heading orientation
-            turn = max(-0.55, min(0.55, yaw_error))
-            await self._client.move(0.0, 0.0, turn, 0.35)
-            return f"turn toward {waypoint.name} (error: {yaw_error:.2f} rad)"
 
         # 5.5 LIVE OBSTACLE AVOIDANCE GUARD
-        # Check if the front distance sonar/LiDAR segment reads an obstacle closer than 0.70 meters
         if len(range_obstacle) > 0 and 0.01 < range_obstacle[0] < 0.70:
-            # Command an immediate fallback maneuver: back up slightly and pivot left to clear space
             await self._client.move(-0.15, 0.0, 0.40, 0.40)
             return f"avoiding obstacle! object detected front: {range_obstacle[0]:.2f}m"
 
-        # 6. Walk forward confidently if heading is aligned and path is clear
-        step_duration = min(0.55, max(0.25, distance * 0.25))
-        await self._client.move(0.25, 0.0, 0.0, step_duration)
-        return f"step toward {waypoint.name} (dist: {distance:.2f}m)"
+        # 6. BLENDED CONTROL LAW (Eradicates the turn-vs-walk hard switch glitch)
+        # If facing completely away (more than 45 degrees / 0.8 rad), pivot in place first to protect gears
+        if abs(yaw_error) > 0.80:
+            turn = max(-0.60, min(0.60, yaw_error * 1.5))
+            await self._client.move(0.0, 0.0, turn, 0.40)
+            return f"pivoting toward {waypoint.name} (error: {yaw_error:.2f} rad)"
+
+        # If we are roughly facing the target hemisphere, walk forward AND steer at the same time!
+        # Dynamically scale down forward speed if misaligned, full speed if tracking perfectly straight
+        alignment_factor = math.cos(yaw_error)
+        vx = 0.30 * max(0.25, alignment_factor) 
+        
+        # Proportional steering command scaling with the error
+        vyaw = max(-0.60, min(0.60, yaw_error * 1.8))
+        
+        # Stream the combined linear + angular velocity vector
+        step_duration = min(0.50, max(0.30, distance * 0.25))
+        await self._client.move(vx, 0.0, vyaw, step_duration)
+        return f"driving toward {waypoint.name} (dist: {distance:.2f}m, error: {yaw_error:.2f} rad)"
+        
     async def scan(self) -> None:
         """Perform a small visual scan without committing to travel."""
         await self._client.move(0.0, 0.0, 0.45, 0.35)
