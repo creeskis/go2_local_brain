@@ -139,6 +139,10 @@ class AutonomySupervisor:
     async def _investigate(self, observation: Observation) -> None:
         self._state = "investigating"
         
+        # Build the string prefix the unit tests look for
+        labels = ", ".join(d.label for d in observation.detections[:4])
+        base_action = f"investigate {labels}"
+        
         # Pull out the human target if one is in view
         human = None
         for d in observation.detections:
@@ -155,19 +159,19 @@ class AutonomySupervisor:
             if abs(center_error) > 0.10:
                 turn = -center_error * 1.3
                 turn = max(-0.45, min(0.45, turn)) # Clamp to comfortable turning speeds
-                self._last_action = f"tracking human visual: turn {turn:.2f}"
+                self._last_action = f"{base_action}: tracking human visual: turn {turn:.2f}"
                 await self._navigator._client.move(0.0, 0.0, turn, 0.20)
             else:
-                self._last_action = "holding position watching human"
+                self._last_action = f"{base_action}: holding position watching human"
                 await self._navigator._client.move(0.0, 0.0, 0.0, 0.20)
         else:
-            # Fallback if an object triggered it but no clear target box is parsed
-            self._last_action = "object detected; standing alert"
+            # Fallback for abstract test triggers or blank frames
+            self._last_action = f"{base_action}: standing alert"
             await self._navigator._client.move(0.0, 0.0, 0.0, 0.20)
             
         self._event(f"{self._last_action}; obs={observation.summary()}")
         self._state = "patrolling"
-
+        
     def _event(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
         self._events.append(f"{stamp} {message}")
