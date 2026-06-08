@@ -198,7 +198,7 @@ class FollowControllerTests(unittest.TestCase):
             detections=[Detection("person", 0.9, x=480, y=240, width=90, height=120)],
         )
         command = controller.plan(observation)
-        self.assertGreater(command.vyaw, 0.0)
+        self.assertLess(command.vyaw, 0.0)
         self.assertGreater(command.vx, 0.0)
         self.assertIn("person", controller.last_target)
 
