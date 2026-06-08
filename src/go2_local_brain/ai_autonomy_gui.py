@@ -810,7 +810,8 @@ async def _amain() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = _parse_args()
     map_path = Path(args.map) if args.map else None
-    await AiAutonomyGui(M
+    await AiAutonomyGui(
+        args.host,
         args.detector,
         args.yolo_model,
         args.yolo_threshold,
