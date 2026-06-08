@@ -20,6 +20,11 @@ GO2_IP=192.168.123.121
 
 `GO2_IP` points at the dog, not the Jetson.
 
+Deeper docs:
+
+- `docs/how_it_works.md`: architecture, command flow, AI flow, movement safety, video, LiDAR, and where to change things.
+- `docs/browser_modes.md`: every browser GUI module, what it starts, and how to test each mode.
+
 # Installation Guide 1: WSL Instance
 
 ## 1. Configure WSL Networking
@@ -208,6 +213,8 @@ python -m go2_local_brain.wasd_video_gui --host 0.0.0.0 --port 8773
 # 4. AI CLI + WASD/QE keyboard controller + video + LiDAR.
 python -m go2_local_brain.ai_wasd_lidar_gui --host 0.0.0.0 --port 8774
 ```
+
+Full mode guide: `docs/browser_modes.md`.
 
 The WASD modules include a locomotion mode panel. Use `Normal` before switching between experiments. `Hind Walk`
 uses `WalkUpright`, `BackStand` attempts the firmware `BackStand` command, `HandStand` toggles `HandStand`,

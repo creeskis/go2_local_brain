@@ -2,6 +2,8 @@
 
 The unified GUI runs manual control, AI commands, live video, and LiDAR from one Python process and one WebRTC connection.
 
+For the newer feature-specific browser modules, including AI-only, WASD-only, AI+LiDAR, and AI+WASD+LiDAR modes, see `docs/browser_modes.md`.
+
 Run it from a WSL instance:
 
 ```bash
