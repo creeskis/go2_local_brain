@@ -540,9 +540,21 @@ _INDEX_HTML = """<!doctype html>
   <main>
     <aside>
       <h2>Map Builder</h2>
+      
+      <div style="background:#0e1012; border:1px solid var(--line); padding:10px; border-radius:6px; margin-bottom:12px; font-size:13px; font-family:monospace;">
+        <strong style="color:var(--muted);">Odom Pose:</strong> 
+        X: <span id="poseX" style="color:#ffd11a; font-weight:bold;">0.000</span>m | 
+        Y: <span id="poseY" style="color:#ffd11a; font-weight:bold;">0.000</span>m | 
+        Heading: <span id="poseYaw" style="color:#6ee7ff; font-weight:bold;">0.0</span>°
+      </div>
+
       <label>Map name <input id="mapName" value="new-map"></label>
       <div id="waypoints"></div>
-      <button onclick="addWaypoint()">Add Waypoint</button>
+      
+      <div class="grid" style="margin-top:8px;">
+        <button onclick="addWaypoint()" style="margin-top:0;">Add Blank Point</button>
+        <button onclick="addCurrentPositionWaypoint()" style="margin-top:0; background:var(--ok); border-color:#55a878;">Capture Current Position</button>
+      </div>
       <label>Patrol route <textarea id="route" placeholder="home, room_center, left_scan"></textarea></label>
       <label>No-go zones <textarea id="nogos" placeholder="stairs, loose_cables"></textarea></label>
       <button onclick="saveMap()">Save And Load Map</button>
@@ -577,11 +589,27 @@ _INDEX_HTML = """<!doctype html>
     </aside>
     <section class="video" id="videoPanel"><img id="video" src="/video.mjpg" alt="Live robot video"><div id="overlay"></div></section>
   </main>
+ 
+
   <script>
     let loadedEditorPath = null;
+    let lastRobotPose = {x: 0, y: 0, yaw: 0};
+
     function splitList(value) {
       return value.split(",").map(v => v.trim()).filter(Boolean);
     }
+
+    // Capture dynamic pose vectors and build structured maps
+    function addCurrentPositionWaypoint() {
+      const pointCount = document.querySelectorAll("#waypoints .row").length;
+      addWaypoint({
+        name: point_${pointCount},
+        x: lastRobotPose.x,
+        y: lastRobotPose.y,
+        yaw: Math.round(lastRobotPose.yaw)
+      });
+    }
+
     function addWaypoint(wp = {}) {
       const row = document.createElement("div");
       row.className = "row";
@@ -702,6 +730,15 @@ _INDEX_HTML = """<!doctype html>
     async function refresh() {
       const res = await fetch("/status.json");
       const data = await res.json();
+      
+      // Map dynamic telemetry variables directly into browser text nodes
+      if (data.current_pose) {
+        lastRobotPose = data.current_pose;
+        document.getElementById("poseX").textContent = data.current_pose.x.toFixed(3);
+        document.getElementById("poseY").textContent = data.current_pose.y.toFixed(3);
+        document.getElementById("poseYaw").textContent = data.current_pose.yaw.toFixed(1);
+      }
+
       const a = data.autonomy || {};
       const f = data.follow || {};
       document.getElementById("top").textContent = `${data.status} video=${data.video_frames} state=${a.state || "none"}`;
@@ -773,12 +810,7 @@ async def _amain() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = _parse_args()
     map_path = Path(args.map) if args.map else None
-    await AiAutonomyGui(
-        args.host,
-        args.port,
-        Path(args.maps_dir),
-        map_path,
-        args.allow_no_detector,
+    await AiAutonomyGui(M
         args.detector,
         args.yolo_model,
         args.yolo_threshold,
