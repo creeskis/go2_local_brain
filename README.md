@@ -24,6 +24,7 @@ Deeper docs:
 
 - `docs/how_it_works.md`: architecture, command flow, AI flow, movement safety, video, LiDAR, and where to change things.
 - `docs/browser_modes.md`: every browser GUI module, what it starts, and how to test each mode.
+- `docs/ai_autonomy.md`: AI-only patrol mode, map format, perception interface, and next detector/planner targets.
 
 # Installation Guide 1: WSL Instance
 
@@ -212,6 +213,9 @@ python -m go2_local_brain.wasd_video_gui --host 0.0.0.0 --port 8773
 
 # 4. AI CLI + WASD/QE keyboard controller + video + LiDAR.
 python -m go2_local_brain.ai_wasd_lidar_gui --host 0.0.0.0 --port 8774
+
+# 5. AI-only autonomy mode: map patrol + perception hook + video/status UI.
+python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --map maps/home.json
 ```
 
 Full mode guide: `docs/browser_modes.md`.
@@ -220,6 +224,10 @@ The WASD modules include a locomotion mode panel. Use `Normal` before switching 
 uses `WalkUpright`, `BackStand` attempts the firmware `BackStand` command, `HandStand` toggles `HandStand`,
 and `Bound` / `Jump` toggle `FreeBound` / `FreeJump`; WASD movement continues through the standard `Move` command
 after the selected mode is active.
+
+AI-only autonomy mode is a supervised patrol loop. It uses `maps/home.json` as a first-pass relative waypoint map,
+runs short interruptible move/scan steps, exposes activate/pause/resume/step/stop controls, and has a perception
+interface ready for YOLO/AprilTag/image-detection integration.
 
 Good startup prompts:
 

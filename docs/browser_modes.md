@@ -18,6 +18,7 @@ pip install -e .
 | AI prompt box + video + LiDAR, no keyboard driving | `go2_local_brain.ai_lidar_gui` | `8772` |
 | WASD/QE keyboard driving + video, no AI or LiDAR | `go2_local_brain.wasd_video_gui` | `8773` |
 | AI prompt box + WASD/QE + video + LiDAR | `go2_local_brain.ai_wasd_lidar_gui` | `8774` |
+| AI-only patrol supervisor + video/status | `go2_local_brain.ai_autonomy_gui` | `8775` |
 | Manual cockpit with exact sport-command buttons | `go2_local_brain.control_gui` | `8770` |
 | Original combined GUI | `go2_local_brain.gui` | `8765` |
 
@@ -28,6 +29,7 @@ python -m go2_local_brain.ai_cli_video_gui --host 0.0.0.0 --port 8771
 python -m go2_local_brain.ai_lidar_gui --host 0.0.0.0 --port 8772
 python -m go2_local_brain.wasd_video_gui --host 0.0.0.0 --port 8773
 python -m go2_local_brain.ai_wasd_lidar_gui --host 0.0.0.0 --port 8774
+python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --map maps/home.json
 python -m go2_local_brain.control_gui --host 0.0.0.0 --port 8770
 python -m go2_local_brain.gui --host 0.0.0.0 --port 8765
 ```
@@ -122,6 +124,23 @@ Starts everything in one process:
 - LiDAR switch-on, LiDAR subscription, and Three.js point-cloud rendering.
 
 Use this only after video/control and LiDAR work separately.
+
+### 5. AI-Only Autonomy
+
+```bash
+python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --map maps/home.json
+```
+
+Starts:
+
+- WebRTC robot connection.
+- Live MJPEG video.
+- Map-based patrol supervisor.
+- Perception provider hook.
+- Activate/pause/resume/step/stop controls.
+- Event log and observation status.
+
+This mode does not expose WASD. It is meant to test the autonomy supervisor loop. Details: `docs/ai_autonomy.md`.
 
 ## Locomotion Modes
 
