@@ -34,18 +34,17 @@ If you only need to run it, start with the install guides and command cheat shee
 
 ## Known Hardware Setup
 
-This repository is tuned around the setup Cooper has already tested.
 
 | Part | Value |
 | --- | --- |
 | Robot | Unitree Go2 Air |
 | Firmware | `1.1.7` |
-| Robot state | RoboVerse/jailbroken, SSH open on port 22 |
+| Robot state | Jailbroken, SSH open on port 22 |
 | Robot STA/control IP | `192.168.123.121` |
 | Secondary observed Go2 IP | `192.168.123.161` |
 | Jetson Orin target IP | `192.168.123.18` |
 | Jetson OS target | JetPack `6.2.1` |
-| WSL-host IP on robot subnet | `192.168.123.14` |
+| WSL-host IP on robot subnet | `192.168.123.x` |
 | Local model | `qwen3:1.7b` through Ollama |
 | AES key | blank unless a future firmware path requires one |
 
