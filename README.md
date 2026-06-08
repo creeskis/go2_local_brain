@@ -214,8 +214,8 @@ python -m go2_local_brain.wasd_video_gui --host 0.0.0.0 --port 8773
 # 4. AI CLI + WASD/QE keyboard controller + video + LiDAR.
 python -m go2_local_brain.ai_wasd_lidar_gui --host 0.0.0.0 --port 8774
 
-# 5. AI-only autonomy mode: map patrol + perception hook + video/status UI.
-python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --map maps/home.json
+# 5. AI-only autonomy mode: map builder/saver + perception check + video/status UI.
+python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --maps-dir maps
 ```
 
 Full mode guide: `docs/browser_modes.md`.
@@ -225,9 +225,10 @@ uses `WalkUpright`, `BackStand` attempts the firmware `BackStand` command, `Hand
 and `Bound` / `Jump` toggle `FreeBound` / `FreeJump`; WASD movement continues through the standard `Move` command
 after the selected mode is active.
 
-AI-only autonomy mode is a supervised patrol loop. It uses `maps/home.json` as a first-pass relative waypoint map,
-runs short interruptible move/scan steps, exposes activate/pause/resume/step/stop controls, and has a perception
-interface ready for YOLO/AprilTag/image-detection integration.
+AI-only autonomy mode is a supervised patrol loop. It now starts with no configured map. Use the browser map builder
+to create, save, and load a patrol map before activation. By default, activation also requires a validated detector;
+install optional vision dependencies with `pip install -e ".[vision]"` and run with `--detector yolo`, or explicitly
+use `--allow-no-detector` for camera-only dry runs.
 
 Good startup prompts:
 

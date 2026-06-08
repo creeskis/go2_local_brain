@@ -17,5 +17,10 @@ dependencies = [
     "pillow",
 ]
 
+[project.optional-dependencies]
+vision = [
+    "ultralytics",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]

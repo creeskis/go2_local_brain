@@ -8,9 +8,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from go2_local_brain.autonomy.map import PatrolMap, Waypoint, load_patrol_map
+from go2_local_brain.autonomy.map import PatrolMap, Waypoint, list_patrol_maps, load_patrol_map, save_patrol_map
 from go2_local_brain.autonomy.navigator import AutonomyNavigator
-from go2_local_brain.autonomy.perception import Detection, Observation, PerceptionProvider
+from go2_local_brain.autonomy.perception import (
+    CameraOnlyPerceptionProvider,
+    Detection,
+    Observation,
+    PerceptionProvider,
+    YoloPerceptionProvider,
+)
 from go2_local_brain.autonomy.supervisor import AutonomySupervisor
 
 
@@ -76,6 +82,15 @@ class PatrolMapTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_patrol_map(path)
 
+    def test_save_and_list_patrol_map(self) -> None:
+        patrol_map = _map()
+        with tempfile.TemporaryDirectory() as td:
+            path = save_patrol_map(patrol_map, td)
+            self.assertTrue(path.exists())
+            maps = list_patrol_maps(td)
+        self.assertEqual(maps[0]["name"], "test")
+        self.assertTrue(maps[0]["ready"])
+
 
 class AutonomySupervisorTests(unittest.TestCase):
     def test_step_once_patrols_next_waypoint(self) -> None:
@@ -117,6 +132,21 @@ class AutonomySupervisorTests(unittest.TestCase):
         self.assertEqual(status.state, "idle")
         self.assertFalse(status.active)
         self.assertGreater(client.stops, 0)
+
+
+class PerceptionTests(unittest.TestCase):
+    def test_camera_only_provider_is_not_detector_ready(self) -> None:
+        provider = CameraOnlyPerceptionProvider(lambda: b"jpeg")
+        health = asyncio.run(provider.health())
+        self.assertFalse(health.ready)
+        self.assertEqual(health.backend, "camera-only")
+
+    def test_yolo_provider_waits_for_camera_frame_before_loading_model(self) -> None:
+        provider = YoloPerceptionProvider(lambda: None)
+        health = asyncio.run(provider.health())
+        self.assertFalse(health.ready)
+        self.assertEqual(health.backend, "yolo")
+        self.assertIn("no camera frame", health.detail)
 
 
 if __name__ == "__main__":

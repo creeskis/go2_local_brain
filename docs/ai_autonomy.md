@@ -14,7 +14,20 @@ The LLM/planner layer should stay high level. Deterministic Python owns movement
 cd ~/robotics/go2_local_brain
 source .venv/bin/activate
 pip install -e .
-python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --map maps/home.json
+python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --maps-dir maps
+```
+
+For YOLO image detection:
+
+```bash
+pip install -e ".[vision]"
+python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --maps-dir maps --detector yolo --yolo-model yolov8n.pt
+```
+
+For a camera-only dry run that bypasses detector readiness:
+
+```bash
+python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --maps-dir maps --allow-no-detector
 ```
 
 Open:
@@ -28,12 +41,13 @@ http://localhost:8775
 The autonomy GUI shows:
 
 - Live video.
+- Map builder/saver/loader.
 - Autonomy state.
 - Current waypoint.
 - Last observation summary.
 - Last action.
 - Event log.
-- Buttons: activate, pause, resume, step once, stop.
+- Buttons: save/load map, check image detection, activate, pause, resume, step once, stop.
 
 It does not expose WASD. This mode is meant for watching the autonomy supervisor make decisions.
 
@@ -53,11 +67,7 @@ error_stop
 
 ## Map Format
 
-Starter map:
-
-```text
-maps/home.json
-```
+There is intentionally no configured `home.json` in the repo. Create your own map in the browser, save it, then load it before activating autonomy.
 
 Shape:
 
@@ -75,6 +85,8 @@ Shape:
 
 This is a rough relative map, not real SLAM. Coordinates are first-pass patrol hints. Keep distances small until localization is added.
 
+The browser saves maps as JSON under `maps/` by default. A map is patrol-ready only when it has at least one waypoint and a non-empty patrol route whose names all exist in the waypoint list.
+
 ## Perception Interface
 
 Perception lives in:
@@ -83,13 +95,16 @@ Perception lives in:
 src/go2_local_brain/autonomy/perception.py
 ```
 
-Current provider:
+Current providers:
 
 ```text
-NullPerceptionProvider
+CameraOnlyPerceptionProvider
+YoloPerceptionProvider
 ```
 
-It reports whether a camera frame exists and returns no detections. This is intentional. The next detector can plug into the same interface by returning:
+Camera-only reports whether a camera frame exists and returns no detections. It is not considered detector-ready. YOLO uses the optional `ultralytics` package and is considered ready only when a camera frame exists and the model can load.
+
+The next detector can plug into the same interface by returning:
 
 ```python
 Observation(
