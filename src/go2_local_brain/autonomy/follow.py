@@ -79,45 +79,45 @@ class HumanFollowController:
         self._last_action = command.reason
         return command
 
-def plan(self, observation: Observation, sound_cue: SoundCue | None = None) -> FollowCommand:
-        target = best_human_detection(observation)
-        if target is None:
-            if sound_cue is not None and time.time() - sound_cue.timestamp < 2.0:
-                turn = 0.25 if sound_cue.direction is None else _clamp(sound_cue.direction, -self._max_turn, self._max_turn)
-                self._last_target = "sound"
-                return FollowCommand(0.0, turn, self._duration_s, "scan toward sound")
-            self._last_target = "none"
-            return FollowCommand(0.0, 0.25, self._duration_s, "scan for person")
-
-        center_x = _relative_center(target.x, observation.frame_width)
-        height = _relative_size(target.height, observation.frame_height)
-        if center_x is None:
-            center_error = 0.0
-        else:
-            center_error = center_x - 0.5
-
-        # FIX: Added a negative sign to center_error (-center_error).
-        # This ensures a human on the right (positive error) results in a negative turn (turn right).
-        turn = 0.0 if abs(center_error) < self._deadband else _clamp(-center_error * 1.4, -self._max_turn, self._max_turn)
-        
-        if height is None:
-            forward = 0.0
-        else:
-            distance_error = self._target_height - height
-            forward = _clamp(distance_error * 1.6, -0.30, self._max_forward)
-            if abs(distance_error) < 0.04:
+    def plan(self, observation: Observation, sound_cue: SoundCue | None = None) -> FollowCommand:
+            target = best_human_detection(observation)
+            if target is None:
+                if sound_cue is not None and time.time() - sound_cue.timestamp < 2.0:
+                    turn = 0.25 if sound_cue.direction is None else _clamp(sound_cue.direction, -self._max_turn, self._max_turn)
+                    self._last_target = "sound"
+                    return FollowCommand(0.0, turn, self._duration_s, "scan toward sound")
+                self._last_target = "none"
+                return FollowCommand(0.0, 0.25, self._duration_s, "scan for person")
+    
+            center_x = _relative_center(target.x, observation.frame_width)
+            height = _relative_size(target.height, observation.frame_height)
+            if center_x is None:
+                center_error = 0.0
+            else:
+                center_error = center_x - 0.5
+    
+            # FIX: Added a negative sign to center_error (-center_error).
+            # This ensures a human on the right (positive error) results in a negative turn (turn right).
+            turn = 0.0 if abs(center_error) < self._deadband else _clamp(-center_error * 1.4, -self._max_turn, self._max_turn)
+            
+            if height is None:
                 forward = 0.0
-
-        self._last_target = f"person:{target.confidence:.2f}"
-        if forward == 0.0 and turn == 0.0:
-            reason = "hold person centered"
-        elif forward > 0.0:
-            reason = "follow person forward"
-        elif forward < 0.0:
-            reason = "back away from person"
-        else:
-            reason = "turn toward person"
-        return FollowCommand(forward, turn, self._duration_s, reason)
+            else:
+                distance_error = self._target_height - height
+                forward = _clamp(distance_error * 1.6, -0.30, self._max_forward)
+                if abs(distance_error) < 0.04:
+                    forward = 0.0
+    
+            self._last_target = f"person:{target.confidence:.2f}"
+            if forward == 0.0 and turn == 0.0:
+                reason = "hold person centered"
+            elif forward > 0.0:
+                reason = "follow person forward"
+            elif forward < 0.0:
+                reason = "back away from person"
+            else:
+                reason = "turn toward person"
+            return FollowCommand(forward, turn, self._duration_s, reason)
 
 
 class LocalSoundLevelProvider:
