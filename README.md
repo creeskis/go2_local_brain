@@ -121,7 +121,7 @@ Run manual video cockpit:
 python -m go2_local_brain.control_gui --host 0.0.0.0 --port 8770
 ```
 
-Run AI-only autonomy with map builder and video:
+Run the primary mapping cockpit with WASD/manual override, map builder, patrol, follow, and video:
 
 ```bash
 python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --maps-dir maps
@@ -480,7 +480,7 @@ flowchart TB
     UnifiedGui["gui.py<br/>AI + manual + video + LiDAR"] --> Driver
     Viewer["viewer.py<br/>video/LiDAR viewer"] --> Driver
 
-    AiAuto["ai_autonomy_gui.py<br/>map + perception + follow UI"] --> Auto["autonomy/*"]
+    AiAuto["ai_autonomy_gui.py<br/>mapping cockpit + manual override + patrol/follow"] --> Auto["autonomy/*"]
     Auto --> Driver
     Auto --> Perception["perception.py<br/>YOLO/face observations"]
     Auto --> Follow["follow.py<br/>person/sound following"]
@@ -673,7 +673,7 @@ The repo has several browser entry points. They all create one Python web server
 | AI prompt + video + LiDAR | `go2_local_brain.ai_lidar_gui` | `8772` |
 | WASD + video | `go2_local_brain.wasd_video_gui` | `8773` |
 | AI + WASD + video + LiDAR | `go2_local_brain.ai_wasd_lidar_gui` | `8774` |
-| AI-only maps/perception/follow | `go2_local_brain.ai_autonomy_gui` | `8775` |
+| Primary mapping cockpit: WASD/manual override + map creation + patrol/follow | `go2_local_brain.ai_autonomy_gui` | `8775` |
 
 Run examples:
 
@@ -704,9 +704,9 @@ flowchart LR
 
 The browser does not use a fancy video player. It uses a normal image tag pointed at an MJPEG stream.
 
-## AI-Only Autonomy
+## Mapping Cockpit And AI Autonomy
 
-AI-only autonomy lives here:
+The main browser workflow lives here:
 
 ```text
 src/go2_local_brain/ai_autonomy_gui.py
@@ -725,6 +725,19 @@ With YOLO:
 pip install -e ".[vision]"
 python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --maps-dir maps --detector yolo --yolo-model yolov8n.pt
 ```
+
+This is the GUI to use when building maps. It combines:
+
+- live video,
+- fixed-origin map plane,
+- click-to-add waypoints,
+- map save/load,
+- WASD/manual override,
+- sport-command override buttons,
+- patrol activation,
+- detection/follow controls.
+
+Manual movement pauses patrol/follow and takes over immediately. The map plane uses fixed coordinates centered on origin, so saved waypoint positions do not change just because the robot was started from a different browser session or process.
 
 ### Autonomy Design
 
@@ -1073,8 +1086,10 @@ Use it after isolated video/control modes work.
 
 ### `src/go2_local_brain/ai_autonomy_gui.py`
 
-Browser GUI for:
+Primary browser cockpit for:
 
+- WASD/manual override,
+- exact sport-command override buttons,
 - map building,
 - map saving/loading,
 - autonomy activation,
@@ -1095,6 +1110,9 @@ It uses `aiohttp` routes like:
 | `/api/maps/save` | Save map from browser editor. |
 | `/api/maps/load` | Load saved map. |
 | `/api/perception/check` | Check detector readiness. |
+| `/api/manual/move` | Manual WASD/button movement override. |
+| `/api/manual/stop` | Manual stop override. |
+| `/api/manual/sport` | Exact sport-command override. |
 | `/api/autonomy/{action}` | Activate/pause/resume/step/stop patrol. |
 | `/api/follow/{action}` | Start/step/stop follow mode. |
 

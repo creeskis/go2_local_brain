@@ -18,7 +18,7 @@ pip install -e .
 | AI prompt box + video + LiDAR, no keyboard driving | `go2_local_brain.ai_lidar_gui` | `8772` |
 | WASD/QE keyboard driving + video, no AI or LiDAR | `go2_local_brain.wasd_video_gui` | `8773` |
 | AI prompt box + WASD/QE + video + LiDAR | `go2_local_brain.ai_wasd_lidar_gui` | `8774` |
-| AI-only map builder + patrol supervisor + video/status | `go2_local_brain.ai_autonomy_gui` | `8775` |
+| Primary mapping cockpit: WASD/manual override + map builder + patrol/follow + video/status | `go2_local_brain.ai_autonomy_gui` | `8775` |
 | Manual cockpit with exact sport-command buttons | `go2_local_brain.control_gui` | `8770` |
 | Original combined GUI | `go2_local_brain.gui` | `8765` |
 
@@ -125,7 +125,7 @@ Starts everything in one process:
 
 Use this only after video/control and LiDAR work separately.
 
-### 5. AI-Only Autonomy
+### 5. Primary Mapping Cockpit
 
 ```bash
 python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --maps-dir maps
@@ -135,13 +135,16 @@ Starts:
 
 - WebRTC robot connection.
 - Live MJPEG video.
-- Browser map builder/saver/loader.
+- WASD/QE and button manual override.
+- Exact sport-command override buttons for common postures/gaits.
+- Fixed-origin browser map plane and map builder/saver/loader.
 - Map-based patrol supervisor after a patrol-ready map is loaded.
 - Perception provider hook with detector health check.
+- Human follow controls.
 - Activate/pause/resume/step/stop controls.
 - Event log and observation status.
 
-This mode does not expose WASD. It is meant to create/load maps, validate perception, and test the autonomy supervisor loop. Saved maps can be drafts; activation only works after the selected map has at least one waypoint and a route that references existing waypoint names. Details: `docs/ai_autonomy.md`.
+This is now the main workflow for mapping and autonomy. Manual movement pauses patrol/follow and takes over immediately. Saved maps can be drafts; activation only works after the selected map has at least one waypoint and a route that references existing waypoint names. Details: `docs/ai_autonomy.md`.
 
 ## Locomotion Modes
 

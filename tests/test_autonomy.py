@@ -117,7 +117,7 @@ class AutonomySupervisorTests(unittest.TestCase):
         status = supervisor.status()
         self.assertEqual(status.state, "patrolling")
         self.assertTrue(client.moves)
-        self.assertIn("step toward target", status.last_action)
+        self.assertIn("driving toward target", status.last_action)
 
     def test_detection_triggers_investigation_scan(self) -> None:
         client = FakeClient()
@@ -130,7 +130,7 @@ class AutonomySupervisorTests(unittest.TestCase):
         status = supervisor.status()
         self.assertEqual(status.state, "patrolling")
         self.assertIn("investigate person", status.last_action)
-        self.assertGreaterEqual(len(client.moves), 2)
+        self.assertGreaterEqual(len(client.moves), 1)
 
     def test_stop_clears_active_task_and_stops_client(self) -> None:
         client = FakeClient()

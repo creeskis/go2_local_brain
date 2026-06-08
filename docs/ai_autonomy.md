@@ -1,6 +1,8 @@
-# AI-Only Autonomy Mode
+# Mapping Cockpit And AI Autonomy
 
-AI-only mode is not meant to let the LLM directly stream velocity commands. It is a supervised autonomy loop:
+The port `8775` GUI is the primary mapping cockpit. It includes manual WASD override, a fixed-origin map plane, map creation, patrol, detection, follow mode, and live video.
+
+Autonomy mode is not meant to let the LLM directly stream velocity commands. It is a supervised autonomy loop:
 
 ```text
 map route -> perception snapshot -> patrol supervisor -> short movement primitive -> stop/check -> next step
@@ -53,10 +55,13 @@ http://localhost:8775
 
 ## What The GUI Does
 
-The autonomy GUI shows:
+The mapping cockpit shows:
 
 - Live video.
+- WASD/QE and button manual override.
+- Exact sport-command override buttons.
 - Map builder/saver/loader.
+- Fixed-origin map plane for waypoint creation.
 - Autonomy state.
 - Current waypoint.
 - Last observation summary.
@@ -66,7 +71,7 @@ The autonomy GUI shows:
 - Follow Human start/step/stop controls.
 - Buttons: save/load map, check image detection, activate, pause, resume, step once, stop.
 
-It does not expose WASD. This mode is meant for watching the autonomy supervisor make decisions.
+Manual movement pauses patrol/follow and takes over immediately. The map plane remains fixed around the map origin, so saved waypoint coordinates are stable between sessions. The current version still uses operator-created coordinates; true robot-pose mapping needs pose-topic integration after hardware probing.
 
 ## Current State Machine
 
@@ -84,7 +89,7 @@ error_stop
 
 ## Map Format
 
-There is intentionally no configured `home.json` in the repo. Create your own map in the browser, save it, then load it before activating autonomy.
+There is intentionally no configured `home.json` in the repo. Create your own map in the browser, save it, then load it before activating autonomy. Click the map plane to add waypoints in fixed coordinates, then add those waypoint names to the patrol route.
 
 Shape:
 

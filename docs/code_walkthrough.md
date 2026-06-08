@@ -208,7 +208,7 @@ Where to edit:
 | Change point orientation for Three.js | `viewer.py`, `_orient_points_for_three()` |
 | Change max rendered points | `viewer.py`, `_MAX_LIDAR_POINTS` |
 
-### 6. AI-Only Autonomy, Map Builder, Detection, Follow
+### 6. Primary Mapping Cockpit, Map Builder, Detection, Follow
 
 Command:
 
@@ -227,7 +227,7 @@ Flow:
 
 ```mermaid
 flowchart TD
-    GUI["ai_autonomy_gui.py"] --> Map["autonomy/map.py"]
+    GUI["ai_autonomy_gui.py<br/>WASD/manual override + map plane"] --> Map["autonomy/map.py"]
     GUI --> Perception["autonomy/perception.py"]
     GUI --> Follow["autonomy/follow.py"]
     GUI --> Supervisor["autonomy/supervisor.py"]
@@ -241,7 +241,7 @@ Files involved:
 
 | File | Why it matters |
 | --- | --- |
-| `ai_autonomy_gui.py` | Browser UI, routes, video stream, perception loop, follow routes, map save/load. |
+| `ai_autonomy_gui.py` | Primary browser UI, WASD/manual override routes, fixed map plane, video stream, perception loop, follow routes, map save/load. |
 | `autonomy/map.py` | Map JSON data, drafts, validation, save/load/list. |
 | `autonomy/supervisor.py` | Patrol state machine. |
 | `autonomy/navigator.py` | Converts a waypoint into a short movement. |
@@ -254,6 +254,7 @@ Where to edit:
 | Desired change | Edit here |
 | --- | --- |
 | Change map JSON format | `autonomy/map.py`, then update browser in `ai_autonomy_gui.py` |
+| Change manual override controls | `ai_autonomy_gui.py`, `/api/manual/*` routes and `_INDEX_HTML` |
 | Change patrol decisions | `autonomy/supervisor.py`, `step_once()` |
 | Change waypoint movement | `autonomy/navigator.py`, `move_toward()` |
 | Change detector backend | `autonomy/perception.py` |
@@ -793,7 +794,7 @@ Use this as a working all-in-one cockpit, but prefer `mode_gui.py` for new featu
 
 ### `AiAutonomyGui`
 
-AI-only autonomy browser app.
+Primary mapping cockpit browser app.
 
 Constructor settings:
 
@@ -820,6 +821,9 @@ Important methods:
 | `_map_save()` | Save draft or patrol-ready map. |
 | `_map_load()` | Load patrol-ready map. |
 | `_perception_check()` | Check detector and observe once. |
+| `_manual_move()` | Manual WASD/button movement override. |
+| `_manual_stop()` | Manual stop override. |
+| `_manual_sport()` | Exact sport-command override. |
 | `_follow_action()` | Start/stop/step follow mode. |
 | `_autonomy_action()` | Activate/pause/resume/stop/step patrol. |
 | `_video_stream()` | MJPEG video endpoint. |
@@ -834,6 +838,7 @@ Important methods:
 | `_follow_step()` | One follow control decision. |
 | `_sound_cue()` | Read optional local sound cue. |
 | `_stop_follow()` | Cancel follow and stop robot. |
+| `_pause_autonomy_for_manual()` | Pause patrol/follow before manual override. |
 | `_activation_error()` | Explain why autonomy cannot activate. |
 
 Helper functions:
@@ -852,6 +857,8 @@ Where to edit:
 | Desired change | Edit here |
 | --- | --- |
 | Add a browser control | `_INDEX_HTML`, matching route method |
+| Change WASD/manual takeover | `_manual_move()`, `_manual_stop()`, `_pause_autonomy_for_manual()`, and `_INDEX_HTML` key handlers |
+| Change fixed map plane | `_INDEX_HTML` functions `renderPlane()`, `planePoint()`, `worldPoint()`, `addWaypointFromPlane()` |
 | Change detection overlay | `_INDEX_HTML` CSS/JS `drawDetections()` |
 | Change activation requirements | `_activation_error()` |
 | Change follow source choices | `_parse_args()` and `_sound_cue()` |

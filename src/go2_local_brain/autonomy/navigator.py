@@ -89,7 +89,7 @@ class AutonomyNavigator:
                 # Note the wrong direction, execute a localized pivot maneuver to correct it
                 turn = max(-0.45, min(0.45, heading_error * 1.5))
                 await self._client.move(0.0, 0.0, turn, 0.35)
-                return f"aligning orientation at {waypoint.name} (heading error: {math.degrees(heading_error):.1f}°)"
+                return f"aligning orientation at {waypoint.name} (heading error: {math.degrees(heading_error):.1f}deg)"
             
             # Orientation pristine! Execute room sweep scan and pass tracking controls forward
             await self.scan()

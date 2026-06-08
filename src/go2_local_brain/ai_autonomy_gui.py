@@ -1,4 +1,4 @@
-"""AI-only autonomy mode: map patrol, perception hook, status, and video."""
+"""Primary mapping cockpit: manual override, map creation, patrol, follow, and video."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,7 @@ log = logging.getLogger(__name__)
 
 
 class AiAutonomyGui:
-    """Browser shell for activating and watching autonomous patrol."""
+    """Browser shell for mapping, manual override, autonomous patrol, and follow mode."""
 
     def __init__(
         self,
@@ -109,6 +110,9 @@ class AiAutonomyGui:
         app.router.add_post("/api/maps/save", self._map_save)
         app.router.add_post("/api/maps/load", self._map_load)
         app.router.add_post("/api/perception/check", self._perception_check)
+        app.router.add_post("/api/manual/move", self._manual_move)
+        app.router.add_post("/api/manual/stop", self._manual_stop)
+        app.router.add_post("/api/manual/sport", self._manual_sport)
         app.router.add_post("/api/follow/{action}", self._follow_action)
         app.router.add_post("/api/autonomy/{action}", self._autonomy_action)
 
@@ -226,6 +230,51 @@ class AiAutonomyGui:
             {"ok": self._perception_ready(), "health": self._perception_health.__dict__, "observation": self._latest_observation.to_dict()}
         )
 
+    async def _manual_move(self, request: web.Request) -> web.Response:
+        if self._client is None:
+            return web.json_response({"ok": False, "result": "robot client is not ready"}, status=503)
+        payload = await _json_or_empty(request)
+        try:
+            vx = float(payload.get("vx", 0.0))
+            vy = float(payload.get("vy", 0.0))
+            vyaw = float(payload.get("vyaw", 0.0))
+            duration_s = float(payload.get("duration_s", 0.30))
+        except (TypeError, ValueError) as exc:
+            return web.json_response({"ok": False, "result": f"bad move payload: {exc}"}, status=400)
+        await self._pause_autonomy_for_manual()
+        await self._client.move(vx, vy, vyaw, duration_s)
+        self._last_result = f"manual move vx={vx:.2f} vy={vy:.2f} vyaw={vyaw:.2f}"
+        return web.json_response({"ok": True, "result": self._last_result, "status": self._status_payload()})
+
+    async def _manual_stop(self, _request: web.Request) -> web.Response:
+        if self._client is None:
+            return web.json_response({"ok": False, "result": "robot client is not ready"}, status=503)
+        await self._stop_follow()
+        if self._supervisor is not None:
+            await self._supervisor.pause()
+        await self._client.stop()
+        self._last_result = "manual stop"
+        return web.json_response({"ok": True, "result": self._last_result, "status": self._status_payload()})
+
+    async def _manual_sport(self, request: web.Request) -> web.Response:
+        if self._client is None:
+            return web.json_response({"ok": False, "result": "robot client is not ready"}, status=503)
+        payload = await _json_or_empty(request)
+        name = str(payload.get("name", "")).strip()
+        parameter = payload.get("parameter")
+        if not name:
+            return web.json_response({"ok": False, "result": "sport command name is required"}, status=400)
+        if parameter is not None and not isinstance(parameter, dict):
+            return web.json_response({"ok": False, "result": "sport parameter must be an object"}, status=400)
+        await self._pause_autonomy_for_manual()
+        try:
+            await self._client.sport_command(name, parameter)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("manual sport command failed")
+            return web.json_response({"ok": False, "result": f"{name} failed: {exc}"}, status=400)
+        self._last_result = f"manual sport {name}"
+        return web.json_response({"ok": True, "result": self._last_result, "status": self._status_payload()})
+
     async def _follow_action(self, request: web.Request) -> web.Response:
         action = request.match_info["action"]
         if action == "start":
@@ -294,44 +343,30 @@ class AiAutonomyGui:
     def _status_payload(self) -> dict[str, Any]:
         autonomy = self._supervisor.status().__dict__ if self._supervisor is not None else None
         map_payload = self._patrol_map.to_dict() if self._patrol_map is not None else empty_patrol_map().to_dict()
-        
-        # DIAGNOSTIC ADDITION: Scan the WebRTC client for internal tracking dictionaries
-        raw_telemetry = {}
-        if self._client is not None:
-            for field_name in ["_sport_state", "sport_state", "_state", "state", "_telemetry"]:
-                if hasattr(self._client, field_name):
-                    raw_telemetry[field_name] = getattr(self._client, field_name)
-
-        # Extract and format real-time coordinates for flat GUI access
         current_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
-        sport_data = raw_telemetry.get("_sport_state") or raw_telemetry.get("sport_state")
+        sport_data = getattr(self._client, "_sport_state", None) if self._client is not None else None
         if isinstance(sport_data, dict):
             pos = sport_data.get("position", [0.0, 0.0, 0.0])
             if len(pos) >= 2:
                 current_pose["x"] = round(pos[0], 3)
                 current_pose["y"] = round(pos[1], 3)
-            
+
             imu = sport_data.get("imu_state", {})
             if isinstance(imu, dict):
                 rpy = imu.get("rpy", [0.0, 0.0, 0.0])
                 if len(rpy) >= 3:
-                    import math
-                    current_pose["yaw"] = round(math.degrees(rpy[2]), 1)
+                    current_pose["yaw"] = round(_degrees(float(rpy[2])), 1)
 
         return {
             "status": self._status,
             "video_frames": self._video_frames,
-            "current_pose": current_pose,  # Injects clean coordinates into status strea
+            "current_pose": current_pose,
             "maps_dir": str(self._maps_dir),
             "map_path": str(self._map_path) if self._map_path is not None else None,
             "map_loaded": self._patrol_map is not None,
             "map": map_payload,
             "perception": self._perception_health.__dict__,
             "observation": self._latest_observation.to_dict(),
-            
-            # Injects the raw low-level state telemetry straight into your browser data stream
-            "robot_internal_telemetry": raw_telemetry,
-            
             "follow": {
                 "active": self._follow_task is not None and not self._follow_task.done(),
                 "source": self._follow_source,
@@ -431,6 +466,12 @@ class AiAutonomyGui:
             await self._client.stop()
         self._follow_last_action = "stopped"
 
+    async def _pause_autonomy_for_manual(self) -> None:
+        if self._follow_task is not None and not self._follow_task.done():
+            await self._stop_follow()
+        if self._supervisor is not None and self._supervisor.status().state not in {"idle", "paused"}:
+            await self._supervisor.pause()
+
     def _perception_ready(self) -> bool:
         return self._perception_health.ready or self._allow_no_detector
 
@@ -499,18 +540,22 @@ def _string_list(value: object) -> list[str]:
     return []
 
 
+def _degrees(radians: float) -> float:
+    return math.degrees(radians)
+
+
 _INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Go2 AI Autonomy</title>
+  <title>Go2 Mapping Cockpit</title>
   <style>
     :root { color-scheme: dark; --bg:#101113; --panel:#17191d; --line:#333841; --text:#e8e8e8; --muted:#aeb7c2; --danger:#8c1d2c; --ok:#2e6f4f; }
     * { box-sizing: border-box; }
     body { margin:0; background:var(--bg); color:var(--text); font-family:system-ui, Segoe UI, sans-serif; }
     header { height:46px; display:flex; align-items:center; justify-content:space-between; padding:0 14px; background:#1b1d21; border-bottom:1px solid var(--line); }
-    main { height:calc(100vh - 46px); display:grid; grid-template-columns:minmax(340px, 430px) 1fr; }
+    main { height:calc(100vh - 46px); display:grid; grid-template-columns:minmax(390px, 520px) 1fr; }
     aside { padding:12px; overflow:auto; border-right:1px solid var(--line); background:var(--panel); }
     .video { background:#050505; min-width:0; min-height:0; display:flex; align-items:center; justify-content:center; position:relative; overflow:hidden; }
     #video { width:100%; height:100%; object-fit:contain; display:block; }
@@ -530,25 +575,65 @@ _INDEX_HTML = """<!doctype html>
     label { display:grid; gap:5px; margin-top:8px; color:var(--muted); font-size:12px; }
     pre { white-space:pre-wrap; word-break:break-word; background:#0e1012; border:1px solid var(--line); border-radius:6px; padding:8px; color:#cbd5df; min-height:44px; }
     .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .grid3 { display:grid; grid-template-columns:repeat(3, 1fr); gap:7px; }
+    .grid4 { display:grid; grid-template-columns:repeat(4, 1fr); gap:7px; }
     .grid button { margin-top:0; }
-    .row { display:grid; grid-template-columns:1.2fr .8fr .8fr .8fr; gap:6px; margin-top:6px; }
+    .grid3 button, .grid4 button { margin-top:0; }
+    .row { display:grid; grid-template-columns:1.15fr .7fr .7fr .7fr .9fr; gap:6px; margin-top:6px; }
+    .planeWrap { position:relative; height:280px; background:#0b0d10; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+    #mapPlane { width:100%; height:100%; display:block; cursor:crosshair; }
+    .planeMeta { position:absolute; left:8px; bottom:8px; color:var(--muted); font-size:12px; background:rgba(14,16,18,.78); padding:4px 6px; border-radius:4px; }
+    .drivepad { display:grid; grid-template-columns:repeat(3, 1fr); gap:7px; }
+    .drivepad button { min-height:38px; margin-top:0; }
     @media (max-width:900px) { main { grid-template-columns:1fr; grid-template-rows:auto 60vh; } aside { border-right:0; border-bottom:1px solid var(--line); } }
   </style>
 </head>
 <body>
-  <header><strong>Go2 AI Autonomy</strong><span id="top">starting</span></header>
+  <header><strong>Go2 Mapping Cockpit</strong><span id="top">starting</span></header>
   <main>
     <aside>
+      <button class="stop" onclick="manualStop()">STOP</button>
+
+      <h2>Manual Override</h2>
+      <div class="drivepad">
+        <span></span><button data-move="forward">W</button><span></span>
+        <button data-move="left">A</button><button onclick="manualSport('BalanceStand')">Balance</button><button data-move="right">D</button>
+        <button data-move="turnLeft">Q</button><button data-move="back">S</button><button data-move="turnRight">E</button>
+        <button data-move="walkTurnLeft">W+Q</button><button onclick="manualStop()">Stop</button><button data-move="walkTurnRight">W+E</button>
+      </div>
+      <label>Speed <input id="speed" type="range" min="0.10" max="0.75" step="0.05" value="0.45"></label>
+      <label>Turn <input id="turn" type="range" min="0.20" max="1.10" step="0.05" value="0.85"></label>
+
+      <h2>Motion Overrides</h2>
+      <div class="grid4">
+        <button onclick="manualSport('StandUp')">Stand</button>
+        <button onclick="manualSport('BalanceStand')">Balance</button>
+        <button onclick="manualSport('StandDown')">Down</button>
+        <button onclick="manualSport('RecoveryStand')">Recover</button>
+        <button onclick="manualSport('Hello')">Hello</button>
+        <button onclick="manualSport('Dance1')">Dance</button>
+        <button onclick="manualSport('BackStand', {data:true})">BackStand</button>
+        <button onclick="manualSport('HandStand', {data:true})">HandStand</button>
+        <button onclick="manualSport('FreeJump', {data:true})">Jump</button>
+        <button onclick="manualSport('FreeBound', {data:true})">Bound</button>
+        <button onclick="manualSport('WalkUpright', {data:true})">Upright</button>
+        <button onclick="manualSport('WalkUpright', {data:false})">Normal</button>
+      </div>
+
       <h2>Map Builder</h2>
       
       <div style="background:#0e1012; border:1px solid var(--line); padding:10px; border-radius:6px; margin-bottom:12px; font-size:13px; font-family:monospace;">
         <strong style="color:var(--muted);">Odom Pose:</strong> 
         X: <span id="poseX" style="color:#ffd11a; font-weight:bold;">0.000</span>m | 
         Y: <span id="poseY" style="color:#ffd11a; font-weight:bold;">0.000</span>m | 
-        Heading: <span id="poseYaw" style="color:#6ee7ff; font-weight:bold;">0.0</span>°
+        Heading: <span id="poseYaw" style="color:#6ee7ff; font-weight:bold;">0.0</span>deg
       </div>
 
       <label>Map name <input id="mapName" value="new-map"></label>
+      <div class="planeWrap">
+        <svg id="mapPlane" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+        <div class="planeMeta" id="planeMeta">origin locked, +/-3m</div>
+      </div>
       <div id="waypoints"></div>
       
       <div class="grid" style="margin-top:8px;">
@@ -594,6 +679,9 @@ _INDEX_HTML = """<!doctype html>
   <script>
     let loadedEditorPath = null;
     let lastRobotPose = {x: 0, y: 0, yaw: 0};
+    const activeMoves = new Set();
+    const planeRangeM = 3.0;
+    let moveTimer = null;
 
     function splitList(value) {
       return value.split(",").map(v => v.trim()).filter(Boolean);
@@ -603,7 +691,7 @@ _INDEX_HTML = """<!doctype html>
     function addCurrentPositionWaypoint() {
       const pointCount = document.querySelectorAll("#waypoints .row").length;
       addWaypoint({
-        name: point_${pointCount},
+        name: `point_${pointCount}`,
         x: lastRobotPose.x,
         y: lastRobotPose.y,
         yaw: Math.round(lastRobotPose.yaw)
@@ -618,14 +706,16 @@ _INDEX_HTML = """<!doctype html>
         <input placeholder="x" type="number" step="0.1" value="${wp.x ?? 0}">
         <input placeholder="y" type="number" step="0.1" value="${wp.y ?? 0}">
         <input placeholder="yaw" type="number" step="1" value="${wp.yaw ?? 0}">
+        <input placeholder="note" value="${wp.note || ""}">
       `;
       document.getElementById("waypoints").appendChild(row);
+      renderPlane();
     }
     function collectMap() {
       const rows = [...document.querySelectorAll("#waypoints .row")];
       const waypoints = rows.map(row => {
         const inputs = row.querySelectorAll("input");
-        return {name: inputs[0].value.trim(), x: Number(inputs[1].value), y: Number(inputs[2].value), yaw: Number(inputs[3].value)};
+        return {name: inputs[0].value.trim(), x: Number(inputs[1].value), y: Number(inputs[2].value), yaw: Number(inputs[3].value), note: inputs[4].value.trim()};
       }).filter(wp => wp.name);
       return {
         name: document.getElementById("mapName").value.trim() || "untitled",
@@ -642,6 +732,55 @@ _INDEX_HTML = """<!doctype html>
       for (const [name, wp] of entries) addWaypoint({name, ...wp});
       document.getElementById("route").value = (map.patrol_route || []).join(", ");
       document.getElementById("nogos").value = (map.no_go_zones || []).join(", ");
+      renderPlane();
+    }
+    function planePoint(x, y) {
+      return {
+        px: 50 + (x / planeRangeM) * 50,
+        py: 50 - (y / planeRangeM) * 50
+      };
+    }
+    function worldPoint(px, py) {
+      return {
+        x: ((px - 50) / 50) * planeRangeM,
+        y: ((50 - py) / 50) * planeRangeM
+      };
+    }
+    function renderPlane() {
+      const svg = document.getElementById("mapPlane");
+      if (!svg) return;
+      const map = collectMap();
+      const route = new Set(map.patrol_route || []);
+      const points = map.waypoints.map(wp => ({...wp, ...planePoint(wp.x, wp.y)}));
+      const routeLines = [];
+      const byName = Object.fromEntries(points.map(wp => [wp.name, wp]));
+      for (let i = 1; i < map.patrol_route.length; i++) {
+        const a = byName[map.patrol_route[i - 1]];
+        const b = byName[map.patrol_route[i]];
+        if (a && b) routeLines.push(`<line x1="${a.px}" y1="${a.py}" x2="${b.px}" y2="${b.py}" stroke="#55a878" stroke-width="1.2" vector-effect="non-scaling-stroke"/>`);
+      }
+      svg.innerHTML = `
+        <defs>
+          <pattern id="grid" width="16.6667" height="16.6667" patternUnits="userSpaceOnUse">
+            <path d="M 16.6667 0 L 0 0 0 16.6667" fill="none" stroke="#262d35" stroke-width=".45"/>
+          </pattern>
+        </defs>
+        <rect x="0" y="0" width="100" height="100" fill="url(#grid)"/>
+        <line x1="0" y1="50" x2="100" y2="50" stroke="#596574" stroke-width=".8" vector-effect="non-scaling-stroke"/>
+        <line x1="50" y1="0" x2="50" y2="100" stroke="#596574" stroke-width=".8" vector-effect="non-scaling-stroke"/>
+        <circle cx="50" cy="50" r="1.4" fill="#f1f1f1"/>
+        ${routeLines.join("")}
+        ${points.map(wp => `<g><circle cx="${wp.px}" cy="${wp.py}" r="${route.has(wp.name) ? 2.4 : 1.8}" fill="${route.has(wp.name) ? "#55a878" : "#ffd11a"}"/><text x="${wp.px + 2.2}" y="${wp.py - 2.2}" fill="#e8e8e8" font-size="3.5">${wp.name}</text></g>`).join("")}
+      `;
+      document.getElementById("planeMeta").textContent = `${map.waypoints.length} wp, fixed origin, +/-${planeRangeM}m`;
+    }
+    function addWaypointFromPlane(event) {
+      const svg = document.getElementById("mapPlane");
+      const rect = svg.getBoundingClientRect();
+      const px = ((event.clientX - rect.left) / rect.width) * 100;
+      const py = ((event.clientY - rect.top) / rect.height) * 100;
+      const p = worldPoint(px, py);
+      addWaypoint({name:`wp_${Date.now().toString().slice(-4)}`, x:p.x.toFixed(2), y:p.y.toFixed(2), yaw:0});
     }
     async function saveMap() {
       const res = await fetch("/api/maps/save", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(collectMap())});
@@ -687,6 +826,50 @@ _INDEX_HTML = """<!doctype html>
       const data = await res.json().catch(() => ({result:"bad response"}));
       await refresh();
       if (!res.ok) alert(data.result || `${action} failed`);
+      return data;
+    }
+    function speed() { return Number(document.getElementById("speed").value); }
+    function turn() { return Number(document.getElementById("turn").value); }
+    function moveVector() {
+      const s = speed();
+      const t = turn();
+      let vx = 0, vy = 0, vyaw = 0;
+      if (activeMoves.has("forward")) vx += s;
+      if (activeMoves.has("back")) vx -= s * 0.75;
+      if (activeMoves.has("left")) vy += s * 0.6;
+      if (activeMoves.has("right")) vy -= s * 0.6;
+      if (activeMoves.has("turnLeft")) vyaw += t;
+      if (activeMoves.has("turnRight")) vyaw -= t;
+      if (activeMoves.has("walkTurnLeft")) { vx += s * 0.75; vyaw += t * 0.75; }
+      if (activeMoves.has("walkTurnRight")) { vx += s * 0.75; vyaw -= t * 0.75; }
+      return {vx, vy, vyaw, duration_s:0.30};
+    }
+    async function manualMovePulse() {
+      const body = moveVector();
+      if (!body.vx && !body.vy && !body.vyaw) return;
+      await fetch("/api/manual/move", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)}).catch(() => {});
+    }
+    function holdMove(name) {
+      activeMoves.add(name);
+      manualMovePulse();
+      if (!moveTimer) moveTimer = setInterval(manualMovePulse, 230);
+    }
+    function releaseMove(name) {
+      activeMoves.delete(name);
+      if (!activeMoves.size) manualStop();
+    }
+    async function manualStop() {
+      activeMoves.clear();
+      clearInterval(moveTimer);
+      moveTimer = null;
+      await fetch("/api/manual/stop", {method:"POST"}).catch(() => {});
+      await refresh();
+    }
+    async function manualSport(name, parameter = null) {
+      const res = await fetch("/api/manual/sport", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name, parameter})});
+      const data = await res.json().catch(() => ({result:"bad response"}));
+      await refresh();
+      if (!res.ok) alert(data.result || `${name} failed`);
       return data;
     }
     function imageRectInPanel() {
@@ -771,7 +954,32 @@ _INDEX_HTML = """<!doctype html>
       document.getElementById("events").textContent = (a.events || []).slice(-20).join("\\n");
     }
     window.addEventListener("resize", refresh);
+    document.getElementById("mapPlane").addEventListener("click", addWaypointFromPlane);
+    document.getElementById("waypoints").addEventListener("input", renderPlane);
+    document.getElementById("route").addEventListener("input", renderPlane);
+    document.querySelectorAll("[data-move]").forEach((button) => {
+      const name = button.dataset.move;
+      button.addEventListener("mousedown", () => holdMove(name));
+      button.addEventListener("mouseup", () => releaseMove(name));
+      button.addEventListener("mouseleave", () => releaseMove(name));
+      button.addEventListener("touchstart", (e) => { e.preventDefault(); holdMove(name); });
+      button.addEventListener("touchend", (e) => { e.preventDefault(); releaseMove(name); });
+    });
+    const keyMap = {w:"forward", s:"back", a:"left", d:"right", q:"turnLeft", e:"turnRight"};
+    document.addEventListener("keydown", (e) => {
+      const name = keyMap[e.key.toLowerCase()];
+      if (!name || activeMoves.has(name) || e.target.matches("input, textarea")) return;
+      e.preventDefault();
+      holdMove(name);
+    });
+    document.addEventListener("keyup", (e) => {
+      const name = keyMap[e.key.toLowerCase()];
+      if (!name) return;
+      e.preventDefault();
+      releaseMove(name);
+    });
     addWaypoint({name:"home", x:0, y:0, yaw:0});
+    renderPlane();
     refreshMaps();
     setInterval(refresh, 1000);
     refresh();
