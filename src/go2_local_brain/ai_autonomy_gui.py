@@ -812,6 +812,10 @@ async def _amain() -> None:
     map_path = Path(args.map) if args.map else None
     await AiAutonomyGui(
         args.host,
+        args.port,
+        Path(args.maps_dir),
+        map_path,
+        args.allow_no_detector,
         args.detector,
         args.yolo_model,
         args.yolo_threshold,
