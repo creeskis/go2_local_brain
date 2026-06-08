@@ -7,23 +7,25 @@ snappier walking, strafing, and turning while keeping short command windows.
 
 from __future__ import annotations
 
-# Forward speed (m/s).
-MAX_VX = 0.75
-# Lateral / strafe speed (m/s).
-MAX_VY = 0.40
-# Yaw rate (rad/s).
-MAX_VYAW = 1.10
+# Forward speed (m/s) - Bumped from 0.75 for a faster stride
+MAX_VX = 1.20
 
-# Default duration of a single move command, in seconds.
-DEFAULT_MOVE_DURATION_S = 0.45
+# Lateral / strafe speed (m/s) - Bumped from 0.40
+MAX_VY = 0.65
 
-# Hard ceiling on duration. Stops a hallucinated `duration_s=600` from
-# pinning the robot in a long move loop until the operator intervenes.
-MAX_MOVE_DURATION_S = 2.0
+# Yaw rate (rad/s) - Bumped from 1.10 for snappier turns
+MAX_VYAW = 1.60
+
+# Default duration of a single move command, in seconds - Raised from 0.45
+DEFAULT_MOVE_DURATION_S = 1.00
+
+# Hard ceiling on duration - Raised from 2.0 to allow longer continuous paths.
+# Stops a hallucinated duration_s=600 from pinning the robot.
+MAX_MOVE_DURATION_S = 5.0
 
 # If no fresh command has arrived within this many seconds, the driver's
-# deadman loop will publish zero velocity. Keep this short.
-DEADMAN_TIMEOUT_S = 0.75
+# deadman loop will publish zero velocity. Kept relatively short for safety.
+DEADMAN_TIMEOUT_S = 0.85
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
