@@ -302,9 +302,26 @@ class AiAutonomyGui:
                 if hasattr(self._client, field_name):
                     raw_telemetry[field_name] = getattr(self._client, field_name)
 
+        # Extract and format real-time coordinates for flat GUI access
+        current_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        sport_data = raw_telemetry.get("_sport_state") or raw_telemetry.get("sport_state")
+        if isinstance(sport_data, dict):
+            pos = sport_data.get("position", [0.0, 0.0, 0.0])
+            if len(pos) >= 2:
+                current_pose["x"] = round(pos[0], 3)
+                current_pose["y"] = round(pos[1], 3)
+            
+            imu = sport_data.get("imu_state", {})
+            if isinstance(imu, dict):
+                rpy = imu.get("rpy", [0.0, 0.0, 0.0])
+                if len(rpy) >= 3:
+                    import math
+                    current_pose["yaw"] = round(math.degrees(rpy[2]), 1)
+
         return {
             "status": self._status,
             "video_frames": self._video_frames,
+            "current_pose": current_pose,  # Injects clean coordinates into status strea
             "maps_dir": str(self._maps_dir),
             "map_path": str(self._map_path) if self._map_path is not None else None,
             "map_loaded": self._patrol_map is not None,
