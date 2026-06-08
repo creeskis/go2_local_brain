@@ -229,7 +229,18 @@ AI-only autonomy mode is a supervised patrol loop. It now starts with no configu
 to create and save maps under `maps/`. Incomplete maps are saved as drafts; only patrol-ready maps with waypoints and
 a valid route are loaded for activation. By default, activation also requires a validated detector; install optional
 vision dependencies with `pip install -e ".[vision]"` and run with `--detector yolo`, or explicitly use
-`--allow-no-detector` for camera-only dry runs.
+`--allow-no-detector` for camera-only dry runs. With YOLO active, the browser draws yellow boxes around detected people;
+`--face-detection` also tries optional OpenCV face boxes. The Follow Human panel steers toward the best person box. For
+local-machine sound cues, install `pip install -e ".[audio]"` and start with `--follow-source visual-or-sound`; mono
+laptop microphones can trigger a scan, but they do not provide reliable direction.
+
+```bash
+pip install -e ".[vision]"
+python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --maps-dir maps --detector yolo --face-detection
+
+pip install -e ".[vision,audio]"
+python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --maps-dir maps --detector yolo --face-detection --follow-source visual-or-sound
+```
 
 Good startup prompts:
 

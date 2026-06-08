@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from go2_local_brain.autonomy.follow import HumanFollowController, SoundCue
 from go2_local_brain.autonomy.map import PatrolMap, Waypoint, list_patrol_maps, load_patrol_map, save_patrol_map
 from go2_local_brain.autonomy.navigator import AutonomyNavigator
 from go2_local_brain.autonomy.perception import (
@@ -16,6 +17,7 @@ from go2_local_brain.autonomy.perception import (
     Observation,
     PerceptionProvider,
     YoloPerceptionProvider,
+    best_human_detection,
 )
 from go2_local_brain.autonomy.supervisor import AutonomySupervisor
 
@@ -160,6 +162,68 @@ class PerceptionTests(unittest.TestCase):
         self.assertFalse(health.ready)
         self.assertEqual(health.backend, "yolo")
         self.assertIn("no camera frame", health.detail)
+
+    def test_observation_dict_normalizes_pixel_box(self) -> None:
+        observation = Observation(
+            timestamp=1.0,
+            frame_available=True,
+            frame_width=640,
+            frame_height=480,
+            detections=[Detection("person", 0.9, x=320, y=240, width=160, height=240)],
+        )
+        box = observation.to_dict()["detections"][0]["box"]  # type: ignore[index]
+        self.assertAlmostEqual(box["left"], 0.375)  # type: ignore[index]
+        self.assertAlmostEqual(box["top"], 0.25)  # type: ignore[index]
+        self.assertAlmostEqual(box["width"], 0.25)  # type: ignore[index]
+        self.assertAlmostEqual(box["height"], 0.5)  # type: ignore[index]
+
+    def test_best_human_detection_ignores_other_objects(self) -> None:
+        observation = Observation(
+            timestamp=1.0,
+            frame_available=True,
+            detections=[Detection("chair", 0.99), Detection("person", 0.75), Detection("person", 0.85)],
+        )
+        self.assertEqual(best_human_detection(observation).confidence, 0.85)  # type: ignore[union-attr]
+
+
+class FollowControllerTests(unittest.TestCase):
+    def test_follow_turns_toward_off_center_person(self) -> None:
+        client = FakeClient()
+        controller = HumanFollowController(client)
+        observation = Observation(
+            timestamp=1.0,
+            frame_available=True,
+            frame_width=640,
+            frame_height=480,
+            detections=[Detection("person", 0.9, x=480, y=240, width=90, height=120)],
+        )
+        command = controller.plan(observation)
+        self.assertGreater(command.vyaw, 0.0)
+        self.assertGreater(command.vx, 0.0)
+        self.assertIn("person", controller.last_target)
+
+    def test_follow_backs_away_from_close_person(self) -> None:
+        client = FakeClient()
+        controller = HumanFollowController(client)
+        observation = Observation(
+            timestamp=1.0,
+            frame_available=True,
+            frame_width=640,
+            frame_height=480,
+            detections=[Detection("person", 0.9, x=320, y=240, width=400, height=420)],
+        )
+        command = controller.plan(observation)
+        self.assertLess(command.vx, 0.0)
+        self.assertEqual(command.vyaw, 0.0)
+
+    def test_follow_scans_when_sound_heard_without_person(self) -> None:
+        client = FakeClient()
+        controller = HumanFollowController(client)
+        observation = Observation(timestamp=1.0, frame_available=True)
+        command = controller.plan(observation, SoundCue(timestamp=9999999999.0, level=0.4))
+        self.assertEqual(command.vx, 0.0)
+        self.assertGreater(command.vyaw, 0.0)
+        self.assertEqual(controller.last_target, "sound")
 
 
 if __name__ == "__main__":

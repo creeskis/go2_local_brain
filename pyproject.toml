@@ -20,6 +20,11 @@ dependencies = [
 [project.optional-dependencies]
 vision = [
     "ultralytics",
+    "opencv-python-headless",
+]
+audio = [
+    "sounddevice",
+    "numpy",
 ]
 
 [tool.setuptools.packages.find]

@@ -12,6 +12,7 @@ from typing import Any
 
 from aiohttp import web
 
+from .autonomy.follow import HumanFollowController, LocalSoundLevelProvider, SoundCue
 from .autonomy.map import (
     PatrolMap,
     Waypoint,
@@ -25,6 +26,7 @@ from .autonomy.map import (
 from .autonomy.navigator import AutonomyNavigator
 from .autonomy.perception import (
     CameraOnlyPerceptionProvider,
+    Observation,
     PerceptionHealth,
     PerceptionProvider,
     YoloPerceptionProvider,
@@ -51,6 +53,8 @@ class AiAutonomyGui:
         yolo_model: str,
         yolo_threshold: float,
         yolo_device: str,
+        face_detection: bool,
+        follow_source: str,
     ) -> None:
         self._host = host
         self._port = port
@@ -61,11 +65,20 @@ class AiAutonomyGui:
         self._yolo_model = yolo_model
         self._yolo_threshold = yolo_threshold
         self._yolo_device = yolo_device or None
+        self._face_detection = face_detection
+        self._follow_source = follow_source
         self._client: Go2WebRTCClient | None = None
         self._supervisor: AutonomySupervisor | None = None
         self._patrol_map: PatrolMap | None = None
         self._perception: PerceptionProvider | None = None
         self._perception_health = PerceptionHealth(False, "not-started", "not connected")
+        self._latest_observation = Observation(timestamp=0.0, frame_available=False, note="not connected")
+        self._follow: HumanFollowController | None = None
+        self._follow_task: asyncio.Task[None] | None = None
+        self._follow_last_action = "idle"
+        self._sound_provider = LocalSoundLevelProvider()
+        self._latest_sound_cue: SoundCue | None = None
+        self._perception_task: asyncio.Task[None] | None = None
         self._state_changed = asyncio.Condition()
         self._latest_jpeg: bytes | None = None
         self._latest_video_ts = 0.0
@@ -91,10 +104,12 @@ class AiAutonomyGui:
         app.router.add_get("/", self._index)
         app.router.add_get("/video.mjpg", self._video_stream)
         app.router.add_get("/status.json", self._status_json)
+        app.router.add_get("/detections.json", self._detections_json)
         app.router.add_get("/api/maps", self._maps_list)
         app.router.add_post("/api/maps/save", self._map_save)
         app.router.add_post("/api/maps/load", self._map_load)
         app.router.add_post("/api/perception/check", self._perception_check)
+        app.router.add_post("/api/follow/{action}", self._follow_action)
         app.router.add_post("/api/autonomy/{action}", self._autonomy_action)
 
         runner = web.AppRunner(app)
@@ -119,9 +134,18 @@ class AiAutonomyGui:
         if self._map_path is not None:
             self._load_map(self._map_path)
         self._attach_video()
+        self._follow = HumanFollowController(self._client)
+        self._perception_task = asyncio.create_task(self._perception_loop(), name="go2-ai-perception")
         self._status = "connected"
 
     async def _shutdown(self) -> None:
+        await self._stop_follow()
+        if self._perception_task is not None:
+            self._perception_task.cancel()
+            try:
+                await self._perception_task
+            except asyncio.CancelledError:
+                pass
         if self._supervisor is not None:
             await self._supervisor.stop()
         if self._client is not None:
@@ -151,6 +175,9 @@ class AiAutonomyGui:
 
     async def _status_json(self, _request: web.Request) -> web.Response:
         return web.json_response(self._status_payload())
+
+    async def _detections_json(self, _request: web.Request) -> web.Response:
+        return web.json_response(self._latest_observation.to_dict())
 
     async def _maps_list(self, _request: web.Request) -> web.Response:
         return web.json_response({"maps": list_patrol_maps(self._maps_dir)})
@@ -194,7 +221,29 @@ class AiAutonomyGui:
 
     async def _perception_check(self, _request: web.Request) -> web.Response:
         await self._refresh_perception_health()
-        return web.json_response({"ok": self._perception_ready(), "health": self._perception_health.__dict__})
+        await self._observe_once()
+        return web.json_response(
+            {"ok": self._perception_ready(), "health": self._perception_health.__dict__, "observation": self._latest_observation.to_dict()}
+        )
+
+    async def _follow_action(self, request: web.Request) -> web.Response:
+        action = request.match_info["action"]
+        if action == "start":
+            if self._follow is None:
+                return web.json_response({"ok": False, "result": "follow controller is not ready"}, status=503)
+            if self._supervisor is not None:
+                await self._supervisor.pause()
+            if self._follow_task is None or self._follow_task.done():
+                self._follow_task = asyncio.create_task(self._follow_loop(), name="go2-human-follow")
+                self._follow_last_action = "started"
+            return web.json_response({"ok": True, "result": "follow started", "status": self._status_payload()})
+        if action == "stop":
+            await self._stop_follow()
+            return web.json_response({"ok": True, "result": "follow stopped", "status": self._status_payload()})
+        if action == "step":
+            await self._follow_step()
+            return web.json_response({"ok": True, "result": self._follow_last_action, "status": self._status_payload()})
+        return web.json_response({"ok": False, "result": f"unknown follow action {action!r}"}, status=400)
 
     async def _video_stream(self, _request: web.Request) -> web.StreamResponse:
         response = web.StreamResponse(
@@ -253,6 +302,16 @@ class AiAutonomyGui:
             "map_loaded": self._patrol_map is not None,
             "map": map_payload,
             "perception": self._perception_health.__dict__,
+            "observation": self._latest_observation.to_dict(),
+            "follow": {
+                "active": self._follow_task is not None and not self._follow_task.done(),
+                "source": self._follow_source,
+                "last_action": self._follow_last_action,
+                "last_target": self._follow.last_target if self._follow is not None else "none",
+                "sound_level": self._latest_sound_cue.level if self._latest_sound_cue is not None else None,
+                "sound_age_s": time.time() - self._latest_sound_cue.timestamp if self._latest_sound_cue is not None else None,
+                "sound_error": self._sound_provider.last_error,
+            },
             "allow_no_detector": self._allow_no_detector,
             "detector": self._detector,
             "last_result": self._last_result,
@@ -281,6 +340,7 @@ class AiAutonomyGui:
                 model_name=self._yolo_model,
                 threshold=self._yolo_threshold,
                 device=self._yolo_device,
+                detect_faces=self._face_detection,
             )
         return CameraOnlyPerceptionProvider(lambda: self._latest_jpeg)
 
@@ -289,6 +349,58 @@ class AiAutonomyGui:
             self._perception_health = PerceptionHealth(False, "not-started", "perception provider is not initialized")
             return
         self._perception_health = await self._perception.health()
+
+    async def _observe_once(self) -> Observation:
+        if self._perception is None:
+            self._latest_observation = Observation(timestamp=time.time(), frame_available=False, note="perception not initialized")
+            return self._latest_observation
+        self._latest_observation = await self._perception.observe()
+        return self._latest_observation
+
+    async def _perception_loop(self) -> None:
+        while True:
+            try:
+                await self._observe_once()
+                async with self._state_changed:
+                    self._state_changed.notify_all()
+            except Exception as exc:  # noqa: BLE001
+                log.exception("perception loop failed")
+                self._latest_observation = Observation(timestamp=time.time(), frame_available=self._latest_jpeg is not None, note=str(exc))
+            await asyncio.sleep(0.35 if self._detector == "yolo" else 1.0)
+
+    async def _follow_loop(self) -> None:
+        while True:
+            await self._follow_step()
+            await asyncio.sleep(0.35)
+
+    async def _follow_step(self) -> None:
+        if self._follow is None:
+            self._follow_last_action = "not ready"
+            return
+        sound_cue = await self._sound_cue()
+        command = await self._follow.step(self._latest_observation, sound_cue)
+        self._follow_last_action = command.reason
+
+    async def _sound_cue(self) -> SoundCue | None:
+        if self._follow_source == "visual":
+            return None
+        cue = await asyncio.to_thread(self._sound_provider.listen_once)
+        if cue is not None:
+            self._latest_sound_cue = cue
+        return self._latest_sound_cue
+
+    async def _stop_follow(self) -> None:
+        task = self._follow_task
+        self._follow_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if self._client is not None:
+            await self._client.stop()
+        self._follow_last_action = "stopped"
 
     def _perception_ready(self) -> bool:
         return self._perception_health.ready or self._allow_no_detector
@@ -371,8 +483,13 @@ _INDEX_HTML = """<!doctype html>
     header { height:46px; display:flex; align-items:center; justify-content:space-between; padding:0 14px; background:#1b1d21; border-bottom:1px solid var(--line); }
     main { height:calc(100vh - 46px); display:grid; grid-template-columns:minmax(340px, 430px) 1fr; }
     aside { padding:12px; overflow:auto; border-right:1px solid var(--line); background:var(--panel); }
-    .video { background:#050505; min-width:0; min-height:0; display:flex; align-items:center; justify-content:center; }
+    .video { background:#050505; min-width:0; min-height:0; display:flex; align-items:center; justify-content:center; position:relative; overflow:hidden; }
     #video { width:100%; height:100%; object-fit:contain; display:block; }
+    #overlay { position:absolute; inset:0; pointer-events:none; }
+    .box { position:absolute; border:3px solid #ffd11a; box-shadow:0 0 0 1px #080808, 0 0 12px rgba(255,209,26,.55); color:#080808; font-size:12px; font-weight:800; }
+    .box.face { border-color:#6ee7ff; box-shadow:0 0 0 1px #080808, 0 0 12px rgba(110,231,255,.45); }
+    .tag { position:absolute; left:-3px; top:-24px; background:#ffd11a; padding:2px 6px; border-radius:4px 4px 0 0; white-space:nowrap; }
+    .box.face .tag { background:#6ee7ff; }
     button, input, textarea, select { font:inherit; }
     button { width:100%; border:1px solid #3c4652; background:#242a31; color:#f1f1f1; border-radius:6px; padding:10px; cursor:pointer; margin-top:8px; }
     button:hover { background:#303843; }
@@ -414,6 +531,12 @@ _INDEX_HTML = """<!doctype html>
         <button onclick="act('step')">Step Once</button>
         <button class="stop" onclick="act('stop')">STOP</button>
       </div>
+      <h2>Follow</h2>
+      <div class="grid">
+        <button onclick="follow('start')">Follow Human</button>
+        <button onclick="follow('step')">Follow Step</button>
+      </div>
+      <button class="stop" onclick="follow('stop')">Stop Follow</button>
       <h2>Status</h2>
       <pre id="status">waiting</pre>
       <h2>Map</h2>
@@ -423,7 +546,7 @@ _INDEX_HTML = """<!doctype html>
       <h2>Event Log</h2>
       <pre id="events">waiting</pre>
     </aside>
-    <section class="video"><img id="video" src="/video.mjpg" alt="Live robot video"></section>
+    <section class="video" id="videoPanel"><img id="video" src="/video.mjpg" alt="Live robot video"><div id="overlay"></div></section>
   </main>
   <script>
     let loadedEditorPath = null;
@@ -502,10 +625,56 @@ _INDEX_HTML = """<!doctype html>
       if (!res.ok) alert(data.result || `${action} failed`);
       return data;
     }
+    async function follow(action) {
+      const res = await fetch(`/api/follow/${action}`, {method:"POST"});
+      const data = await res.json().catch(() => ({result:"bad response"}));
+      await refresh();
+      if (!res.ok) alert(data.result || `${action} failed`);
+      return data;
+    }
+    function imageRectInPanel() {
+      const panel = document.getElementById("videoPanel");
+      const img = document.getElementById("video");
+      const panelRect = panel.getBoundingClientRect();
+      const naturalRatio = img.naturalWidth && img.naturalHeight ? img.naturalWidth / img.naturalHeight : panelRect.width / panelRect.height;
+      const panelRatio = panelRect.width / panelRect.height;
+      let width = panelRect.width;
+      let height = panelRect.height;
+      let left = 0;
+      let top = 0;
+      if (panelRatio > naturalRatio) {
+        width = height * naturalRatio;
+        left = (panelRect.width - width) / 2;
+      } else {
+        height = width / naturalRatio;
+        top = (panelRect.height - height) / 2;
+      }
+      return {left, top, width, height};
+    }
+    function drawDetections(observation) {
+      const overlay = document.getElementById("overlay");
+      overlay.innerHTML = "";
+      const rect = imageRectInPanel();
+      for (const det of observation.detections || []) {
+        if (!det.box || (det.kind !== "human" && det.kind !== "face")) continue;
+        const box = document.createElement("div");
+        box.className = `box ${det.kind === "face" ? "face" : ""}`;
+        box.style.left = `${rect.left + det.box.left * rect.width}px`;
+        box.style.top = `${rect.top + det.box.top * rect.height}px`;
+        box.style.width = `${det.box.width * rect.width}px`;
+        box.style.height = `${det.box.height * rect.height}px`;
+        const tag = document.createElement("div");
+        tag.className = "tag";
+        tag.textContent = `${det.label} ${(det.confidence * 100).toFixed(0)}%`;
+        box.appendChild(tag);
+        overlay.appendChild(box);
+      }
+    }
     async function refresh() {
       const res = await fetch("/status.json");
       const data = await res.json();
       const a = data.autonomy || {};
+      const f = data.follow || {};
       document.getElementById("top").textContent = `${data.status} video=${data.video_frames} state=${a.state || "none"}`;
       document.getElementById("status").textContent = [
         `state: ${a.state}`,
@@ -513,7 +682,10 @@ _INDEX_HTML = """<!doctype html>
         `map: ${a.map_name}`,
         `waypoint: ${a.current_waypoint}`,
         `route_index: ${a.route_index}`,
-        `last_action: ${a.last_action}`
+        `last_action: ${a.last_action}`,
+        `follow: ${f.active} source=${f.source} action=${f.last_action}`,
+        `follow_target: ${f.last_target}`,
+        `sound: ${f.sound_level ?? "none"} ${f.sound_error || ""}`
       ].join("\\n");
       document.getElementById("mapStatus").textContent = [
         `loaded: ${data.map_loaded}`,
@@ -528,9 +700,11 @@ _INDEX_HTML = """<!doctype html>
         loadMapIntoEditor(data.map);
         loadedEditorPath = data.map_path;
       }
-      document.getElementById("obs").textContent = a.last_observation || "none";
+      drawDetections(data.observation || {});
+      document.getElementById("obs").textContent = (data.observation?.summary || a.last_observation || "none") + "\\n" + JSON.stringify(data.observation?.detections || [], null, 2);
       document.getElementById("events").textContent = (a.events || []).slice(-20).join("\\n");
     }
+    window.addEventListener("resize", refresh);
     addWaypoint({name:"home", x:0, y:0, yaw:0});
     refreshMaps();
     setInterval(refresh, 1000);
@@ -551,6 +725,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--yolo-model", default="yolov8n.pt")
     parser.add_argument("--yolo-threshold", type=float, default=0.55)
     parser.add_argument("--yolo-device", default="", help="Optional Ultralytics device, for example cuda:0 or cpu")
+    parser.add_argument("--face-detection", action="store_true", help="Also try optional OpenCV Haar face boxes")
+    parser.add_argument(
+        "--follow-source",
+        choices=["visual", "sound", "visual-or-sound"],
+        default="visual",
+        help="Follow person boxes, local sound cues, or both",
+    )
     parser.add_argument(
         "--allow-no-detector",
         action="store_true",
@@ -573,6 +754,8 @@ async def _amain() -> None:
         args.yolo_model,
         args.yolo_threshold,
         args.yolo_device,
+        args.face_detection,
+        args.follow_source,
     ).run()
 
 
