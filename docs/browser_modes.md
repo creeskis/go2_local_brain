@@ -141,7 +141,7 @@ Starts:
 - Activate/pause/resume/step/stop controls.
 - Event log and observation status.
 
-This mode does not expose WASD. It is meant to create/load maps, validate perception, and test the autonomy supervisor loop. Details: `docs/ai_autonomy.md`.
+This mode does not expose WASD. It is meant to create/load maps, validate perception, and test the autonomy supervisor loop. Saved maps can be drafts; activation only works after the selected map has at least one waypoint and a route that references existing waypoint names. Details: `docs/ai_autonomy.md`.
 
 ## Locomotion Modes
 

@@ -85,7 +85,7 @@ Shape:
 
 This is a rough relative map, not real SLAM. Coordinates are first-pass patrol hints. Keep distances small until localization is added.
 
-The browser saves maps as JSON under `maps/` by default. A map is patrol-ready only when it has at least one waypoint and a non-empty patrol route whose names all exist in the waypoint list.
+The browser saves maps as JSON under `maps/` by default. Incomplete maps are kept as drafts so you can build them over several test sessions. A map is patrol-ready only when it has at least one waypoint and a non-empty patrol route whose names all exist in the waypoint list. Saving a patrol-ready map loads it automatically; saving an incomplete map does not activate or replace the current patrol map.
 
 ## Perception Interface
 

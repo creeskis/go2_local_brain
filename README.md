@@ -226,9 +226,10 @@ and `Bound` / `Jump` toggle `FreeBound` / `FreeJump`; WASD movement continues th
 after the selected mode is active.
 
 AI-only autonomy mode is a supervised patrol loop. It now starts with no configured map. Use the browser map builder
-to create, save, and load a patrol map before activation. By default, activation also requires a validated detector;
-install optional vision dependencies with `pip install -e ".[vision]"` and run with `--detector yolo`, or explicitly
-use `--allow-no-detector` for camera-only dry runs.
+to create and save maps under `maps/`. Incomplete maps are saved as drafts; only patrol-ready maps with waypoints and
+a valid route are loaded for activation. By default, activation also requires a validated detector; install optional
+vision dependencies with `pip install -e ".[vision]"` and run with `--detector yolo`, or explicitly use
+`--allow-no-detector` for camera-only dry runs.
 
 Good startup prompts:
 

@@ -23,7 +23,12 @@ from .autonomy.map import (
     safe_map_filename,
 )
 from .autonomy.navigator import AutonomyNavigator
-from .autonomy.perception import CameraOnlyPerceptionProvider, PerceptionHealth, PerceptionProvider, YoloPerceptionProvider
+from .autonomy.perception import (
+    CameraOnlyPerceptionProvider,
+    PerceptionHealth,
+    PerceptionProvider,
+    YoloPerceptionProvider,
+)
 from .autonomy.supervisor import AutonomySupervisor
 from .config import load_config
 from .driver.webrtc_client import Go2Config, Go2WebRTCClient
@@ -153,13 +158,23 @@ class AiAutonomyGui:
     async def _map_save(self, request: web.Request) -> web.Response:
         payload = await _json_or_empty(request)
         try:
-            patrol_map = _patrol_map_from_payload(payload)
+            patrol_map = _patrol_map_from_payload(payload, require_route=False)
             path = save_patrol_map(patrol_map, self._maps_dir)
-            self._load_map(path)
         except Exception as exc:  # noqa: BLE001
             log.exception("map save failed")
             return web.json_response({"ok": False, "result": f"map save failed: {exc}"}, status=400)
-        return web.json_response({"ok": True, "result": f"saved {path.name}", "status": self._status_payload()})
+
+        result = f"saved draft {path.name}"
+        try:
+            patrol_map.validate_for_patrol()
+        except ValueError as exc:
+            if self._map_path is not None and self._map_path.resolve() == path.resolve():
+                await self._unload_map()
+            result = f"{result}; not patrol-ready: {exc}"
+        else:
+            self._load_map(path)
+            result = f"saved and loaded {path.name}"
+        return web.json_response({"ok": True, "result": result, "status": self._status_payload()})
 
     async def _map_load(self, request: web.Request) -> web.Response:
         payload = await _json_or_empty(request)
@@ -252,6 +267,13 @@ class AiAutonomyGui:
         self._map_path = path
         self._supervisor = AutonomySupervisor(patrol_map, AutonomyNavigator(self._client), self._perception)
 
+    async def _unload_map(self) -> None:
+        if self._supervisor is not None:
+            await self._supervisor.stop()
+        self._supervisor = None
+        self._patrol_map = None
+        self._map_path = None
+
     def _make_perception_provider(self) -> PerceptionProvider:
         if self._detector == "yolo":
             return YoloPerceptionProvider(
@@ -295,7 +317,7 @@ async def _json_or_empty(request: web.Request) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _patrol_map_from_payload(payload: dict[str, Any]) -> PatrolMap:
+def _patrol_map_from_payload(payload: dict[str, Any], *, require_route: bool = True) -> PatrolMap:
     if "map" in payload and isinstance(payload["map"], dict):
         patrol_map = patrol_map_from_dict(payload["map"], default_name="untitled")
     else:
@@ -323,7 +345,8 @@ def _patrol_map_from_payload(payload: dict[str, Any]) -> PatrolMap:
             patrol_route=_string_list(payload.get("patrol_route", [])),
             no_go_zones=_string_list(payload.get("no_go_zones", [])),
         )
-    patrol_map.validate_for_patrol()
+    if require_route:
+        patrol_map.validate_for_patrol()
     return patrol_map
 
 

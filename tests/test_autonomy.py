@@ -91,6 +91,19 @@ class PatrolMapTests(unittest.TestCase):
         self.assertEqual(maps[0]["name"], "test")
         self.assertTrue(maps[0]["ready"])
 
+    def test_save_and_list_draft_map(self) -> None:
+        patrol_map = PatrolMap(
+            name="draft",
+            waypoints={"home": Waypoint("home", 0.0, 0.0)},
+            patrol_route=[],
+            no_go_zones=[],
+        )
+        with tempfile.TemporaryDirectory() as td:
+            save_patrol_map(patrol_map, td)
+            maps = list_patrol_maps(td)
+        self.assertEqual(maps[0]["name"], "draft")
+        self.assertFalse(maps[0]["ready"])
+
 
 class AutonomySupervisorTests(unittest.TestCase):
     def test_step_once_patrols_next_waypoint(self) -> None:
