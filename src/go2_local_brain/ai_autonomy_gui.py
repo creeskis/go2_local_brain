@@ -371,7 +371,7 @@ class AiAutonomyGui:
     async def _follow_loop(self) -> None:
         while True:
             await self._follow_step()
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(0.05)
 
     async def _follow_step(self) -> None:
         if self._follow is None:
