@@ -138,10 +138,34 @@ class AutonomySupervisor:
 
     async def _investigate(self, observation: Observation) -> None:
         self._state = "investigating"
-        labels = ", ".join(d.label for d in observation.detections[:4])
-        self._last_action = f"investigate {labels}"
+        
+        # Pull out the human target if one is in view
+        human = None
+        for d in observation.detections:
+            if d.label == "person" or getattr(d, "kind", "") == "human":
+                human = d
+                break
+                
+        if human is not None and observation.frame_width:
+            # Handle both raw pixel values or pre-normalized coordinates
+            center_x = human.x / observation.frame_width if human.x > 1.0 else human.x
+            center_error = center_x - 0.5
+            
+            # Apply our working negative angular gain to track smoothly
+            if abs(center_error) > 0.10:
+                turn = -center_error * 1.3
+                turn = max(-0.45, min(0.45, turn)) # Clamp to comfortable turning speeds
+                self._last_action = f"tracking human visual: turn {turn:.2f}"
+                await self._navigator._client.move(0.0, 0.0, turn, 0.20)
+            else:
+                self._last_action = "holding position watching human"
+                await self._navigator._client.move(0.0, 0.0, 0.0, 0.20)
+        else:
+            # Fallback if an object triggered it but no clear target box is parsed
+            self._last_action = "object detected; standing alert"
+            await self._navigator._client.move(0.0, 0.0, 0.0, 0.20)
+            
         self._event(f"{self._last_action}; obs={observation.summary()}")
-        await self._navigator.scan()
         self._state = "patrolling"
 
     def _event(self, message: str) -> None:
