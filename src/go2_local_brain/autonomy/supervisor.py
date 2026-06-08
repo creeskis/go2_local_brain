@@ -102,7 +102,7 @@ class AutonomySupervisor:
             events=list(self._events),
         )
 
-    async def step_once(self) -> None:
+   async def step_once(self) -> None:
         """Run one patrol decision. Useful for tests and future manual stepping."""
         if self._state == "paused":
             return
@@ -116,13 +116,19 @@ class AutonomySupervisor:
             await self._investigate(observation)
             return
 
-        route_index, waypoint = self._map.next_waypoint(self._route_index)
-        self._route_index = route_index
+        # 1. Look up the active waypoint without changing the index yet
+        _, waypoint = self._map.next_waypoint(self._route_index)
         self._state = "patrolling"
-        self._last_action = await self._navigator.move_toward(waypoint)
+        
+        # 2. Take a step toward the locked waypoint
+        action_result = await self._navigator.move_toward(waypoint)
+        self._last_action = action_result
         self._event(f"{self._last_action}; obs={self._last_observation}")
-        self._route_index = (self._route_index + 1) % len(self._map.patrol_route)
-
+        
+        # 3. ONLY increment to the next waypoint if the navigator says it arrived and scanned!
+        if "scan" in action_result:
+            self._route_index = (self._route_index + 1) % len(self._map.patrol_route)
+            
     async def _run(self) -> None:
         try:
             while True:
