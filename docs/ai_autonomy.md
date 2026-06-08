@@ -71,7 +71,7 @@ The mapping cockpit shows:
 - Follow Human start/step/stop controls.
 - Buttons: save/load map, check image detection, activate, pause, resume, step once, stop.
 
-Manual movement pauses patrol/follow and takes over immediately. The map plane remains fixed around the map origin, so saved waypoint coordinates are stable between sessions. The current version still uses operator-created coordinates; true robot-pose mapping needs pose-topic integration after hardware probing.
+Manual movement pauses patrol/follow and takes over immediately. The map plane remains fixed around the map origin, so saved waypoint coordinates are stable during a session. The local map locks its origin from the first valid sport-state pose, keeps a trail, and feeds the same local pose into patrol navigation.
 
 ## Current State Machine
 
@@ -162,6 +162,8 @@ Each step:
 4. Calls `AutonomyNavigator.move_toward()`.
 5. Logs the action.
 
+`AutonomyNavigator` consumes `LocalMapState` when available, so the waypoint coordinates shown in the browser are the same coordinates used by patrol. The frame is origin-locked: the first valid sport-state `position` and IMU yaw become `(0, 0, 0)`, and later poses are rotated into that start frame.
+
 The navigator only sends short movement windows:
 
 - Small turn if the waypoint is off-angle.
@@ -209,7 +211,7 @@ It should not own raw continuous velocity. The Python supervisor can enforce:
 
 ## Next Implementation Targets
 
-1. Add pose-topic integration after hardware probing.
+1. Add higher-confidence localization if a better pose topic is found during hardware probing.
 2. Add a planner class that can ask Ollama for high-level choices from compact observations.
 3. Add visual landmark localization so waypoints become less approximate.
 4. Add no-go-zone enforcement.

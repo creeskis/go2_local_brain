@@ -927,6 +927,38 @@ Methods:
 
 Edit here for better patrol movement.
 
+## `autonomy/local_map.py`
+
+### `Pose2D`
+
+Small pose record with:
+
+| Field | Meaning |
+| --- | --- |
+| `x` | Local X in meters. |
+| `y` | Local Y in meters. |
+| `yaw` | Heading in radians. |
+
+### `LocalMapState`
+
+Keeps the current map frame. The first valid sport-state pose becomes the origin. Later sport-state positions are rotated into that starting frame, added to a compact trail, and serialized into `/status.json` for the browser map.
+
+Methods:
+
+| Method | Purpose |
+| --- | --- |
+| `reset()` | Clear origin, pose, and trail. |
+| `update_from_sport_state(...)` | Parse telemetry and update local pose/trail. |
+| `current_pose_dict()` | Browser-friendly current pose. |
+| `to_dict()` | Full status payload for map rendering. |
+
+Helpers:
+
+| Function | Purpose |
+| --- | --- |
+| `raw_pose_from_sport_state` | Extract raw `position` and IMU yaw. |
+| `normalize_radians` | Keep heading errors on the shortest path. |
+
 ## `autonomy/supervisor.py`
 
 ### `AutonomyStatus`

@@ -730,6 +730,7 @@ This is the GUI to use when building maps. It combines:
 
 - live video,
 - fixed-origin map plane,
+- live local pose trail,
 - click-to-add waypoints,
 - map save/load,
 - WASD/manual override,
@@ -737,7 +738,7 @@ This is the GUI to use when building maps. It combines:
 - patrol activation,
 - detection/follow controls.
 
-Manual movement pauses patrol/follow and takes over immediately. The map plane uses fixed coordinates centered on origin, so saved waypoint positions do not change just because the robot was started from a different browser session or process.
+Manual movement pauses patrol/follow and takes over immediately. The map plane uses a fixed local origin from the first valid sport-state pose in the current session, so waypoint capture, patrol navigation, and the visible trail all use the same coordinate frame.
 
 ### Autonomy Design
 
@@ -777,6 +778,7 @@ stateDiagram-v2
 | File | Class | Purpose |
 | --- | --- | --- |
 | `autonomy/map.py` | `PatrolMap`, `Waypoint` | Save/load map JSON and validate routes. |
+| `autonomy/local_map.py` | `LocalMapState`, `Pose2D` | Convert sport-state pose into an origin-locked local map and trail. |
 | `autonomy/navigator.py` | `AutonomyNavigator` | Convert a waypoint into one short move or turn. |
 | `autonomy/supervisor.py` | `AutonomySupervisor` | Own autonomy state, route index, pause/resume/stop, and event log. |
 | `autonomy/perception.py` | `Observation`, `Detection`, providers | Report camera and object detections. |
@@ -916,7 +918,7 @@ Saving a patrol-ready map loads it automatically. Saving a draft does not replac
 
 ### Coordinates
 
-Current map coordinates are rough relative hints, not full SLAM localization. Treat `x` and `y` as small local movement goals until pose-topic integration is tested on hardware.
+Map coordinates are local meters from the session origin. The first valid sport-state `position` and IMU yaw become `(0, 0, 0)`, then later positions are rotated into that start frame. This is still odometry-based, not full SLAM: long sessions can drift, and saved maps should be checked before autonomous patrol.
 
 ## LiDAR And Telemetry
 
@@ -1317,16 +1319,16 @@ A stereo or mic-array provider should:
 5. be optional and off by default,
 6. include synthetic-signal tests.
 
-### Add Real Pose-Based Patrol
+### Improve Pose-Based Patrol
 
-Current maps are rough. The right next step is pose-topic probing.
+The current patrol path uses sport-state odometry through `LocalMapState`. The right next step is pose-topic probing for a better localization source.
 
 Desired flow:
 
 1. Subscribe to possible pose topics.
 2. Confirm which topics publish on Go2 Air firmware `1.1.7`.
-3. Cache latest `(x, y, yaw)`.
-4. Update `AutonomyNavigator` to navigate based on current pose instead of assuming local relative movement.
+3. Compare the current sport-state pose with any better `(x, y, yaw)` topic.
+4. Feed the best source into `LocalMapState` without changing the browser map schema.
 5. Keep all movements short and cancellable.
 
 ### Add No-Go Zones

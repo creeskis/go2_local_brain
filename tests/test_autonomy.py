@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from go2_local_brain.autonomy.follow import HumanFollowController, SoundCue
+from go2_local_brain.autonomy.local_map import LocalMapState, normalize_radians, raw_pose_from_sport_state
 from go2_local_brain.autonomy.map import PatrolMap, Waypoint, list_patrol_maps, load_patrol_map, save_patrol_map
 from go2_local_brain.autonomy.navigator import AutonomyNavigator
 from go2_local_brain.autonomy.perception import (
@@ -26,6 +27,7 @@ class FakeClient:
     def __init__(self) -> None:
         self.moves: list[tuple[float, float, float, float]] = []
         self.stops = 0
+        self.sport_state: dict[str, object] | None = None
 
     async def move(self, vx: float, vy: float = 0.0, vyaw: float = 0.0, duration_s: float = 0.0) -> None:
         self.moves.append((vx, vy, vyaw, duration_s))
@@ -107,6 +109,30 @@ class PatrolMapTests(unittest.TestCase):
         self.assertFalse(maps[0]["ready"])
 
 
+class LocalMapStateTests(unittest.TestCase):
+    def test_raw_pose_from_sport_state_extracts_position_and_yaw(self) -> None:
+        pose = raw_pose_from_sport_state({"position": [1.5, -2.0, 0.1], "imu_state": {"rpy": [0.0, 0.0, 1.25]}})
+        self.assertIsNotNone(pose)
+        assert pose is not None
+        self.assertAlmostEqual(pose.x, 1.5)
+        self.assertAlmostEqual(pose.y, -2.0)
+        self.assertAlmostEqual(pose.yaw, 1.25)
+
+    def test_local_map_locks_origin_and_rotates_into_start_frame(self) -> None:
+        state = LocalMapState()
+        state.update_from_sport_state({"position": [10.0, 20.0, 0.0], "imu_state": {"rpy": [0.0, 0.0, 1.57079632679]}})
+        pose = state.update_from_sport_state({"position": [10.0, 21.0, 0.0], "imu_state": {"rpy": [0.0, 0.0, 1.57079632679]}})
+        self.assertIsNotNone(pose)
+        assert pose is not None
+        self.assertAlmostEqual(pose.x, 1.0, places=3)
+        self.assertAlmostEqual(pose.y, 0.0, places=3)
+        self.assertTrue(state.valid)
+        self.assertEqual(state.to_dict()["source"], "sport_state")
+
+    def test_normalize_radians_uses_shortest_angle(self) -> None:
+        self.assertAlmostEqual(normalize_radians(3.5), -2.7831853071795862)
+
+
 class AutonomySupervisorTests(unittest.TestCase):
     def test_step_once_patrols_next_waypoint(self) -> None:
         client = FakeClient()
@@ -147,6 +173,19 @@ class AutonomySupervisorTests(unittest.TestCase):
         self.assertEqual(status.state, "idle")
         self.assertFalse(status.active)
         self.assertGreater(client.stops, 0)
+
+    def test_navigator_uses_shared_local_map_pose(self) -> None:
+        client = FakeClient()
+        client.sport_state = {"position": [5.0, 5.0, 0.0], "imu_state": {"rpy": [0.0, 0.0, 0.0]}}
+        local_map = LocalMapState()
+        navigator = AutonomyNavigator(client, local_map)
+        asyncio.run(navigator.move_toward(Waypoint("target", 1.0, 0.0)))
+        client.sport_state = {"position": [6.0, 5.0, 0.0], "imu_state": {"rpy": [0.0, 0.0, 0.0]}}
+        asyncio.run(navigator.move_toward(Waypoint("target", 1.0, 0.0)))
+        self.assertTrue(local_map.valid)
+        self.assertAlmostEqual(local_map.pose.x, 1.0, places=3)
+        result = asyncio.run(navigator.move_toward(Waypoint("target", 1.0, 0.0)))
+        self.assertIn("scan", result)
 
 
 class PerceptionTests(unittest.TestCase):

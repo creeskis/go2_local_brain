@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import json
 import logging
-import math
 import time
 from pathlib import Path
 from typing import Any
@@ -14,6 +13,7 @@ from typing import Any
 from aiohttp import web
 
 from .autonomy.follow import HumanFollowController, LocalSoundLevelProvider, SoundCue
+from .autonomy.local_map import LocalMapState
 from .autonomy.map import (
     PatrolMap,
     Waypoint,
@@ -71,6 +71,7 @@ class AiAutonomyGui:
         self._client: Go2WebRTCClient | None = None
         self._supervisor: AutonomySupervisor | None = None
         self._patrol_map: PatrolMap | None = None
+        self._local_map = LocalMapState()
         self._perception: PerceptionProvider | None = None
         self._perception_health = PerceptionHealth(False, "not-started", "not connected")
         self._latest_observation = Observation(timestamp=0.0, frame_available=False, note="not connected")
@@ -343,30 +344,29 @@ class AiAutonomyGui:
     def _status_payload(self) -> dict[str, Any]:
         autonomy = self._supervisor.status().__dict__ if self._supervisor is not None else None
         map_payload = self._patrol_map.to_dict() if self._patrol_map is not None else empty_patrol_map().to_dict()
-        current_pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         sport_data = getattr(self._client, "_sport_state", None) if self._client is not None else None
-        if isinstance(sport_data, dict):
-            pos = sport_data.get("position", [0.0, 0.0, 0.0])
-            if len(pos) >= 2:
-                current_pose["x"] = round(pos[0], 3)
-                current_pose["y"] = round(pos[1], 3)
-
-            imu = sport_data.get("imu_state", {})
-            if isinstance(imu, dict):
-                rpy = imu.get("rpy", [0.0, 0.0, 0.0])
-                if len(rpy) >= 3:
-                    current_pose["yaw"] = round(_degrees(float(rpy[2])), 1)
+        self._local_map.update_from_sport_state(sport_data)
+        observation_age_s = time.time() - self._latest_observation.timestamp if self._latest_observation.timestamp else None
 
         return {
             "status": self._status,
             "video_frames": self._video_frames,
-            "current_pose": current_pose,
+            "current_pose": self._local_map.current_pose_dict(),
+            "local_map": self._local_map.to_dict(),
             "maps_dir": str(self._maps_dir),
             "map_path": str(self._map_path) if self._map_path is not None else None,
             "map_loaded": self._patrol_map is not None,
             "map": map_payload,
             "perception": self._perception_health.__dict__,
             "observation": self._latest_observation.to_dict(),
+            "observation_age_s": observation_age_s,
+            "tracker": {
+                "backend": self._perception_health.backend,
+                "ready": self._perception_health.ready,
+                "detection_count": len(self._latest_observation.detections),
+                "fresh": observation_age_s is not None and observation_age_s <= 2.0,
+                "note": self._latest_observation.note,
+            },
             "follow": {
                 "active": self._follow_task is not None and not self._follow_task.done(),
                 "source": self._follow_source,
@@ -388,7 +388,7 @@ class AiAutonomyGui:
         assert self._perception is not None
         self._patrol_map = patrol_map
         self._map_path = path
-        self._supervisor = AutonomySupervisor(patrol_map, AutonomyNavigator(self._client), self._perception)
+        self._supervisor = AutonomySupervisor(patrol_map, AutonomyNavigator(self._client, self._local_map), self._perception)
 
     async def _unload_map(self) -> None:
         if self._supervisor is not None:
@@ -540,10 +540,6 @@ def _string_list(value: object) -> list[str]:
     return []
 
 
-def _degrees(radians: float) -> float:
-    return math.degrees(radians)
-
-
 _INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -623,7 +619,7 @@ _INDEX_HTML = """<!doctype html>
       <h2>Map Builder</h2>
       
       <div style="background:#0e1012; border:1px solid var(--line); padding:10px; border-radius:6px; margin-bottom:12px; font-size:13px; font-family:monospace;">
-        <strong style="color:var(--muted);">Odom Pose:</strong> 
+        <strong style="color:var(--muted);">Local Map Pose:</strong>
         X: <span id="poseX" style="color:#ffd11a; font-weight:bold;">0.000</span>m | 
         Y: <span id="poseY" style="color:#ffd11a; font-weight:bold;">0.000</span>m | 
         Heading: <span id="poseYaw" style="color:#6ee7ff; font-weight:bold;">0.0</span>deg
@@ -679,6 +675,7 @@ _INDEX_HTML = """<!doctype html>
   <script>
     let loadedEditorPath = null;
     let lastRobotPose = {x: 0, y: 0, yaw: 0};
+    let latestLocalMap = {valid:false, source:"waiting", trail:[]};
     const activeMoves = new Set();
     const planeRangeM = 3.0;
     let moveTimer = null;
@@ -687,7 +684,6 @@ _INDEX_HTML = """<!doctype html>
       return value.split(",").map(v => v.trim()).filter(Boolean);
     }
 
-    // Capture dynamic pose vectors and build structured maps
     function addCurrentPositionWaypoint() {
       const pointCount = document.querySelectorAll("#waypoints .row").length;
       addWaypoint({
@@ -752,6 +748,9 @@ _INDEX_HTML = """<!doctype html>
       const map = collectMap();
       const route = new Set(map.patrol_route || []);
       const points = map.waypoints.map(wp => ({...wp, ...planePoint(wp.x, wp.y)}));
+      const trail = (latestLocalMap.trail || []).map(p => planePoint(p.x, p.y));
+      const robot = latestLocalMap.pose ? {...latestLocalMap.pose, ...planePoint(latestLocalMap.pose.x, latestLocalMap.pose.y)} : null;
+      const trailPath = trail.map(p => `${p.px.toFixed(2)},${p.py.toFixed(2)}`).join(" ");
       const routeLines = [];
       const byName = Object.fromEntries(points.map(wp => [wp.name, wp]));
       for (let i = 1; i < map.patrol_route.length; i++) {
@@ -770,9 +769,11 @@ _INDEX_HTML = """<!doctype html>
         <line x1="50" y1="0" x2="50" y2="100" stroke="#596574" stroke-width=".8" vector-effect="non-scaling-stroke"/>
         <circle cx="50" cy="50" r="1.4" fill="#f1f1f1"/>
         ${routeLines.join("")}
+        ${trailPath ? `<polyline points="${trailPath}" fill="none" stroke="#6ee7ff" stroke-width="1.2" vector-effect="non-scaling-stroke" opacity=".82"/>` : ""}
         ${points.map(wp => `<g><circle cx="${wp.px}" cy="${wp.py}" r="${route.has(wp.name) ? 2.4 : 1.8}" fill="${route.has(wp.name) ? "#55a878" : "#ffd11a"}"/><text x="${wp.px + 2.2}" y="${wp.py - 2.2}" fill="#e8e8e8" font-size="3.5">${wp.name}</text></g>`).join("")}
+        ${robot && latestLocalMap.valid ? `<g transform="translate(${robot.px} ${robot.py}) rotate(${-robot.yaw})"><path d="M 0 -3.2 L 2.3 2.5 L 0 1.4 L -2.3 2.5 Z" fill="#f1f1f1" stroke="#080808" stroke-width=".35" vector-effect="non-scaling-stroke"/></g>` : ""}
       `;
-      document.getElementById("planeMeta").textContent = `${map.waypoints.length} wp, fixed origin, +/-${planeRangeM}m`;
+      document.getElementById("planeMeta").textContent = `${map.waypoints.length} wp, trail=${trail.length}, ${latestLocalMap.source || "waiting"}, +/-${planeRangeM}m`;
     }
     function addWaypointFromPlane(event) {
       const svg = document.getElementById("mapPlane");
@@ -921,9 +922,12 @@ _INDEX_HTML = """<!doctype html>
         document.getElementById("poseY").textContent = data.current_pose.y.toFixed(3);
         document.getElementById("poseYaw").textContent = data.current_pose.yaw.toFixed(1);
       }
+      latestLocalMap = data.local_map || latestLocalMap;
+      renderPlane();
 
       const a = data.autonomy || {};
       const f = data.follow || {};
+      const tracker = data.tracker || {};
       document.getElementById("top").textContent = `${data.status} video=${data.video_frames} state=${a.state || "none"}`;
       document.getElementById("status").textContent = [
         `state: ${a.state}`,
@@ -934,9 +938,13 @@ _INDEX_HTML = """<!doctype html>
         `last_action: ${a.last_action}`,
         `follow: ${f.active} source=${f.source} action=${f.last_action}`,
         `follow_target: ${f.last_target}`,
-        `sound: ${f.sound_level ?? "none"} ${f.sound_error || ""}`
+        `sound: ${f.sound_level ?? "none"} ${f.sound_error || ""}`,
+        `tracker: ${tracker.backend || "none"} ready=${tracker.ready} fresh=${tracker.fresh} boxes=${tracker.detection_count ?? 0}`
       ].join("\\n");
       document.getElementById("mapStatus").textContent = [
+        `local_map: valid=${data.local_map?.valid} source=${data.local_map?.source} samples=${data.local_map?.samples}`,
+        `pose: x=${data.current_pose?.x} y=${data.current_pose?.y} yaw=${data.current_pose?.yaw}`,
+        `trail: ${(data.local_map?.trail || []).length} points`,
         `loaded: ${data.map_loaded}`,
         `path: ${data.map_path || "none"}`,
         `name: ${data.map?.name}`,
