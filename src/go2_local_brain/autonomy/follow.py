@@ -54,7 +54,7 @@ class HumanFollowController:
         deadband: float = 0.12,
         max_forward: float = 0.22,
         max_turn: float = 0.45,
-        duration_s: float = 0.28,
+        duration_s: float = 0.45,
     ) -> None:
         self._mover = mover
         self._target_height = target_height
