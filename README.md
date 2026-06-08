@@ -1537,6 +1537,7 @@ Engineering checklist:
 More focused documents live in `docs/`:
 
 - `docs/how_it_works.md`
+- `docs/code_walkthrough.md`
 - `docs/browser_modes.md`
 - `docs/ai_autonomy.md`
 - `docs/live_viewer.md`
