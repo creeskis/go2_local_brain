@@ -72,8 +72,8 @@ class AutonomyNavigator:
         # 6. BLENDED CONTROL LAW (Eradicates the turn-vs-walk hard switch glitch)
         # If facing completely away (more than 45 degrees / 0.8 rad), pivot in place first
         if abs(yaw_error) > 0.80:
-            # ADDED NEGATIVE SIGN HERE TO CORRECT HARDWARE INVERSION
-            turn = max(-0.60, min(0.60, -yaw_error * 1.5))
+            # FIXED: Removed the incorrect negative sign from yaw_error
+            turn = max(-0.60, min(0.60, yaw_error * 1.5))
             await self._client.move(0.0, 0.0, turn, 0.40)
             return f"pivoting toward {waypoint.name} (error: {yaw_error:.2f} rad)"
 
@@ -81,8 +81,8 @@ class AutonomyNavigator:
         alignment_factor = math.cos(yaw_error)
         vx = 0.30 * max(0.25, alignment_factor) 
         
-        # ADDED NEGATIVE SIGN HERE TO CORRECT HARDWARE INVERSION
-        vyaw = max(-0.60, min(0.60, -yaw_error * 1.8))
+        # FIXED: Removed the incorrect negative sign from yaw_error
+        vyaw = max(-0.60, min(0.60, yaw_error * 1.8))
         
         # Stream the combined linear + angular velocity vector
         step_duration = min(0.50, max(0.30, distance * 0.25))
