@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import importlib.util
 import unittest
 
-from go2_local_brain.viewer import (
-    _coerce_position_values,
-    _decimate,
-    _lidar_payload_from_message,
-    _points_from_positions,
-    _xyz_triplets,
-)
+HAS_AIOHTTP = importlib.util.find_spec("aiohttp") is not None
+if HAS_AIOHTTP:
+    from go2_local_brain.viewer import (
+        _coerce_position_values,
+        _decimate,
+        _lidar_payload_from_message,
+        _points_from_positions,
+        _xyz_triplets,
+    )
 
 
+@unittest.skipUnless(HAS_AIOHTTP, "aiohttp not installed")
 class LidarPayloadTests(unittest.TestCase):
     def test_xyz_triplets_ignores_incomplete_tail(self) -> None:
         self.assertEqual(_xyz_triplets([1, 2, 3, 4]), [[1.0, 2.0, 3.0]])
@@ -22,6 +26,7 @@ class LidarPayloadTests(unittest.TestCase):
         payload = _lidar_payload_from_message(message, max_points=10)
         self.assertIsNotNone(payload)
         assert payload is not None
+        self.assertEqual(payload["robot_points"], [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
         self.assertEqual(payload["points"], [[-0.5, 0.0, -1.0], [0.5, 0.0, 1.0]])
         self.assertEqual(payload["point_count"], 2)
         self.assertEqual(payload["source_point_count"], 2)
@@ -31,6 +36,7 @@ class LidarPayloadTests(unittest.TestCase):
         payload = _lidar_payload_from_message(message, max_points=10)
         self.assertIsNotNone(payload)
         assert payload is not None
+        self.assertEqual(payload["robot_points"], [[1.0, 2.0, 3.0]])
         self.assertEqual(payload["points"], [[0.0, 0.0, 0.0]])
 
     def test_lidar_payload_accepts_numpy_like_positions(self) -> None:

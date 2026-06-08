@@ -920,6 +920,38 @@ Saving a patrol-ready map loads it automatically. Saving a draft does not replac
 
 Map coordinates are local meters from the session origin. The first valid sport-state `position` and IMU yaw become `(0, 0, 0)`, then later positions are rotated into that start frame. This is still odometry-based, not full SLAM: long sessions can drift, and saved maps should be checked before autonomous patrol.
 
+### Startup Localization
+
+For a saved map to stay useful across restarts, do not let the current boot silently become a new origin. Use the mapping cockpit's **Startup localization waypoint** field:
+
+1. Load a saved map.
+2. Put the robot at a known waypoint, such as `home`.
+3. Type that waypoint name into **Startup localization waypoint**.
+4. Click **Lock Current Robot To Waypoint/Pose**.
+
+After that, the current raw sport-state odometry is anchored to the saved map pose. The trail, waypoint capture, occupancy cells, and patrol navigation all use that same map frame.
+
+### LiDAR Local Avoidance And Learned Runs
+
+The primary cockpit now subscribes to the Unitree LiDAR topics and keeps two LiDAR products:
+
+- a robot-relative obstacle bubble for front/left/right/rear clearance,
+- a coarse map-frame occupancy layer drawn as red cells on the map.
+
+Patrol still follows the saved waypoint route, but if fresh LiDAR sees an obstacle closer than about `0.70m` in front, the navigator backs up slightly and turns toward the clearer side for that step.
+
+To improve a route by repeated runs:
+
+1. Load and localize the saved map.
+2. Click **Record Run**.
+3. Patrol or manually drive one loop.
+4. Click **Stop Run**.
+5. Repeat a few times.
+6. Click **Average Runs** to draw the averaged orange path.
+7. Click **Save Runs** to write `maps/runs/learned-runs.json` and `maps/runs/lidar-occupancy.json`.
+
+The averaged path is a route suggestion, not a motor controller. Deterministic code still owns collision checks and movement.
+
 ## LiDAR And Telemetry
 
 The project has LiDAR viewer experiments, but current tested telemetry showed:

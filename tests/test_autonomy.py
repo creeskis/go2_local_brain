@@ -10,7 +10,8 @@ import unittest
 from pathlib import Path
 
 from go2_local_brain.autonomy.follow import HumanFollowController, SoundCue
-from go2_local_brain.autonomy.local_map import LocalMapState, normalize_radians, raw_pose_from_sport_state
+from go2_local_brain.autonomy.lidar_map import LidarLocalMapper, LidarObstacleField
+from go2_local_brain.autonomy.local_map import LocalMapState, Pose2D, normalize_radians, raw_pose_from_sport_state
 from go2_local_brain.autonomy.map import PatrolMap, Waypoint, list_patrol_maps, load_patrol_map, save_patrol_map
 from go2_local_brain.autonomy.navigator import AutonomyNavigator
 from go2_local_brain.autonomy.perception import (
@@ -22,6 +23,7 @@ from go2_local_brain.autonomy.perception import (
     YoloPerceptionProvider,
     best_human_detection,
 )
+from go2_local_brain.autonomy.route_learning import PathRunRecorder
 from go2_local_brain.autonomy.supervisor import AutonomySupervisor
 
 
@@ -152,6 +154,65 @@ class LocalMapStateTests(unittest.TestCase):
     def test_normalize_radians_uses_shortest_angle(self) -> None:
         self.assertAlmostEqual(normalize_radians(3.5), -2.7831853071795862)
 
+    def test_local_map_staleness_and_trail_skip(self) -> None:
+        state = LocalMapState(min_trail_step_m=0.5)
+        state.update_from_sport_state({"position": [0.0, 0.0], "imu_state": {"rpy": [0.0, 0.0, 0.0]}}, now=10.0)
+        state.update_from_sport_state({"position": [0.1, 0.0], "imu_state": {"rpy": [0.0, 0.0, 0.0]}}, now=10.1)
+        self.assertEqual(len(state.trail), 1)
+        self.assertTrue(state.is_fresh(now=10.2))
+        self.assertFalse(state.is_fresh(now=12.0))
+
+    def test_local_map_can_lock_startup_pose_to_saved_map_pose(self) -> None:
+        state = LocalMapState()
+        ok = state.lock_to_map_pose(
+            Pose2D(5.0, 2.0, 0.0),
+            {"position": [10.0, 10.0], "imu_state": {"rpy": [0.0, 0.0, 0.0]}},
+            now=1.0,
+        )
+        self.assertTrue(ok)
+        pose = state.update_from_sport_state(
+            {"position": [11.0, 10.0], "imu_state": {"rpy": [0.0, 0.0, 0.0]}},
+            now=2.0,
+        )
+        self.assertIsNotNone(pose)
+        assert pose is not None
+        self.assertAlmostEqual(pose.x, 6.0)
+        self.assertAlmostEqual(pose.y, 2.0)
+
+
+class LidarMapTests(unittest.TestCase):
+    def test_lidar_obstacle_field_reports_front_and_clear_side(self) -> None:
+        field = LidarObstacleField()
+        summary = field.update([[0.45, 0.0, 0.0], [1.2, 0.6, 0.0], [2.0, -0.4, 0.0]], now=1.0)
+        self.assertTrue(summary.fresh)
+        self.assertAlmostEqual(summary.front_m, 0.45)
+        self.assertLess(field.recommended_avoidance_turn(), 0.0)
+
+    def test_lidar_mapper_projects_robot_points_into_map_frame(self) -> None:
+        mapper = LidarLocalMapper(cell_size_m=0.5)
+        mapper.add_scan(Pose2D(1.0, 2.0, 0.0), [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], now=1.0)
+        payload = mapper.to_dict()
+        self.assertEqual(payload["cell_count"], 2)
+        cells = {(cell["x"], cell["y"]) for cell in payload["cells"]}  # type: ignore[index]
+        self.assertIn((2.0, 2.0), cells)
+        self.assertIn((1.0, 3.0), cells)
+
+    def test_run_recorder_averages_repeated_paths(self) -> None:
+        recorder = PathRunRecorder(min_step_m=0.0, min_period_s=0.0)
+        recorder.start("a", now=1.0)
+        recorder.add_pose(Pose2D(0.0, 0.0, 0.0), now=1.0)
+        recorder.add_pose(Pose2D(1.0, 0.0, 0.0), now=2.0)
+        recorder.stop(now=3.0)
+        recorder.start("b", now=4.0)
+        recorder.add_pose(Pose2D(0.0, 1.0, 0.0), now=4.0)
+        recorder.add_pose(Pose2D(1.0, 1.0, 0.0), now=5.0)
+        recorder.stop(now=6.0)
+        averaged = recorder.average_path(points=2)
+        self.assertEqual(averaged[0]["x"], 0.0)
+        self.assertEqual(averaged[0]["y"], 0.5)
+        self.assertEqual(averaged[1]["x"], 1.0)
+        self.assertEqual(averaged[1]["y"], 0.5)
+
 
 class AutonomySupervisorTests(unittest.TestCase):
     def test_step_once_patrols_next_waypoint(self) -> None:
@@ -206,6 +267,15 @@ class AutonomySupervisorTests(unittest.TestCase):
         self.assertAlmostEqual(local_map.pose.x, 1.0, places=3)
         result = asyncio.run(navigator.move_toward(Waypoint("target", 1.0, 0.0)))
         self.assertIn("scan", result)
+
+    def test_navigator_uses_lidar_front_obstacle_before_waypoint_drive(self) -> None:
+        client = FakeClient()
+        field = LidarObstacleField()
+        field.update([[0.4, 0.0, 0.0], [2.0, -0.5, 0.0]], now=9999999999.0)
+        navigator = AutonomyNavigator(client, lidar_obstacles=field)
+        result = asyncio.run(navigator.move_toward(Waypoint("target", 1.0, 0.0)))
+        self.assertIn("lidar avoid", result)
+        self.assertLess(client.moves[-1][0], 0.0)
 
 
 class PerceptionTests(unittest.TestCase):

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,8 @@ from typing import Any
 from aiohttp import web
 
 from .autonomy.follow import FollowCommand, HumanFollowController, LocalSoundLevelProvider, SoundCue
-from .autonomy.local_map import LocalMapState
+from .autonomy.lidar_map import LidarLocalMapper, LidarObstacleField, points_from_lidar_payload
+from .autonomy.local_map import LocalMapState, Pose2D
 from .autonomy.map import (
     PatrolMap,
     Waypoint,
@@ -32,12 +34,18 @@ from .autonomy.perception import (
     PerceptionProvider,
     YoloPerceptionProvider,
 )
+from .autonomy.route_learning import PathRunRecorder
 from .autonomy.supervisor import AutonomySupervisor
 from .config import load_config
 from .driver.webrtc_client import Go2Config, Go2WebRTCClient
-from .viewer import _jpeg_from_frame
+from .viewer import _jpeg_from_frame, _lidar_payload_from_message
 
 log = logging.getLogger(__name__)
+
+_LIDAR_SWITCH_TOPIC = "rt/utlidar/switch"
+_LIDAR_TOPIC = "rt/utlidar/voxel_map"
+_LIDAR_ARRAY_TOPIC = "rt/utlidar/voxel_map_compressed"
+_MAX_LIDAR_POINTS = 1400
 
 
 class AiAutonomyGui:
@@ -72,6 +80,9 @@ class AiAutonomyGui:
         self._supervisor: AutonomySupervisor | None = None
         self._patrol_map: PatrolMap | None = None
         self._local_map = LocalMapState()
+        self._lidar_obstacles = LidarObstacleField()
+        self._lidar_mapper = LidarLocalMapper()
+        self._run_recorder = PathRunRecorder()
         self._perception: PerceptionProvider | None = None
         self._perception_health = PerceptionHealth(False, "not-started", "not connected")
         self._latest_observation = Observation(timestamp=0.0, frame_available=False, note="not connected")
@@ -81,14 +92,22 @@ class AiAutonomyGui:
         self._sound_provider = LocalSoundLevelProvider()
         self._latest_sound_cue: SoundCue | None = None
         self._perception_task: asyncio.Task[None] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._state_changed = asyncio.Condition()
         self._latest_jpeg: bytes | None = None
         self._latest_video_ts = 0.0
         self._video_frames = 0
+        self._latest_lidar: dict[str, Any] | None = None
+        self._latest_lidar_ts = 0.0
+        self._lidar_raw_messages = 0
+        self._lidar_messages = 0
+        self._lidar_parse_errors = 0
+        self._lidar_last_error = ""
         self._status = "starting"
         self._last_result = ""
 
     async def run(self) -> None:
+        self._loop = asyncio.get_running_loop()
         cfg = load_config()
         self._client = Go2WebRTCClient(
             Go2Config(
@@ -107,9 +126,12 @@ class AiAutonomyGui:
         app.router.add_get("/video.mjpg", self._video_stream)
         app.router.add_get("/status.json", self._status_json)
         app.router.add_get("/detections.json", self._detections_json)
+        app.router.add_get("/lidar.json", self._lidar_json)
         app.router.add_get("/api/maps", self._maps_list)
         app.router.add_post("/api/maps/save", self._map_save)
         app.router.add_post("/api/maps/load", self._map_load)
+        app.router.add_post("/api/localize/lock", self._localize_lock)
+        app.router.add_post("/api/runs/{action}", self._run_action)
         app.router.add_post("/api/perception/check", self._perception_check)
         app.router.add_post("/api/manual/move", self._manual_move)
         app.router.add_post("/api/manual/stop", self._manual_stop)
@@ -139,6 +161,7 @@ class AiAutonomyGui:
         if self._map_path is not None:
             self._load_map(self._map_path)
         self._attach_video()
+        self._attach_lidar()
         self._follow = HumanFollowController(self._client)
         self._perception_task = asyncio.create_task(self._perception_loop(), name="go2-ai-perception")
         self._status = "connected"
@@ -154,6 +177,7 @@ class AiAutonomyGui:
         if self._supervisor is not None:
             await self._supervisor.stop()
         if self._client is not None:
+            self._detach_lidar()
             await self._client.close()
 
     def _attach_video(self) -> None:
@@ -164,6 +188,63 @@ class AiAutonomyGui:
             raise RuntimeError("WebRTC video interface not found")
         video.switchVideoChannel(True)
         video.add_track_callback(self._recv_video_track)
+
+    def _attach_lidar(self) -> None:
+        assert self._client is not None
+        conn = getattr(self._client, "_conn", None)
+        datachannel = getattr(conn, "datachannel", None)
+        if datachannel is None:
+            self._lidar_last_error = "WebRTC datachannel unavailable"
+            return
+        set_decoder = getattr(datachannel, "set_decoder", None)
+        if callable(set_decoder):
+            set_decoder(decoder_type="libvoxel")
+        pubsub = getattr(datachannel, "pub_sub", None)
+        if pubsub is None:
+            self._lidar_last_error = "pub_sub unavailable"
+            return
+        try:
+            pubsub.publish_without_callback(_LIDAR_SWITCH_TOPIC, "on")
+            pubsub.subscribe(_LIDAR_TOPIC, self._on_lidar_message)
+            pubsub.subscribe(_LIDAR_ARRAY_TOPIC, self._on_lidar_message)
+        except Exception as exc:  # noqa: BLE001
+            self._lidar_last_error = f"lidar subscribe failed: {exc}"
+            log.warning(self._lidar_last_error)
+
+    def _detach_lidar(self) -> None:
+        if self._client is None:
+            return
+        conn = getattr(self._client, "_conn", None)
+        datachannel = getattr(conn, "datachannel", None)
+        pubsub = getattr(datachannel, "pub_sub", None) if datachannel is not None else None
+        if pubsub is None:
+            return
+        try:
+            pubsub.publish_without_callback(_LIDAR_SWITCH_TOPIC, "off")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("lidar switch off failed: %s", exc)
+
+    def _on_lidar_message(self, message: Any) -> None:
+        self._lidar_raw_messages += 1
+        payload = _lidar_payload_from_message(message, max_points=_MAX_LIDAR_POINTS)
+        if payload is None:
+            self._lidar_parse_errors += 1
+            self._lidar_last_error = "unparsed lidar payload"
+            return
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._set_lidar(payload)))
+
+    async def _set_lidar(self, payload: dict[str, Any]) -> None:
+        self._latest_lidar = payload
+        self._latest_lidar_ts = time.time()
+        self._lidar_messages += 1
+        robot_points = points_from_lidar_payload(payload)
+        summary = self._lidar_obstacles.update(robot_points)
+        if self._local_map.valid:
+            self._lidar_mapper.add_scan(self._local_map.pose, robot_points)
+        self._run_recorder.add_pose(self._local_map.pose if self._local_map.valid else None, lidar_front_m=summary.front_m)
+        async with self._state_changed:
+            self._state_changed.notify_all()
 
     async def _recv_video_track(self, track: Any) -> None:
         while True:
@@ -183,6 +264,9 @@ class AiAutonomyGui:
 
     async def _detections_json(self, _request: web.Request) -> web.Response:
         return web.json_response(self._latest_observation.to_dict())
+
+    async def _lidar_json(self, _request: web.Request) -> web.Response:
+        return web.json_response(self._lidar_payload())
 
     async def _maps_list(self, _request: web.Request) -> web.Response:
         return web.json_response({"maps": list_patrol_maps(self._maps_dir)})
@@ -223,6 +307,47 @@ class AiAutonomyGui:
             log.exception("map load failed: %s", path)
             return web.json_response({"ok": False, "result": f"map load failed: {exc}"}, status=400)
         return web.json_response({"ok": True, "result": f"loaded {path.name}", "status": self._status_payload()})
+
+    async def _localize_lock(self, request: web.Request) -> web.Response:
+        payload = await _json_or_empty(request)
+        sport_data = getattr(self._client, "_sport_state", None) if self._client is not None else None
+        try:
+            pose = self._map_pose_from_payload(payload)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"ok": False, "result": f"bad localization pose: {exc}"}, status=400)
+        if not self._local_map.lock_to_map_pose(pose, sport_data):
+            return web.json_response({"ok": False, "result": "cannot lock map pose until sport-state pose is available"}, status=400)
+        self._lidar_mapper.reset()
+        self._last_result = f"localized robot at x={pose.x:.2f} y={pose.y:.2f} yaw={pose.yaw_deg:.1f}deg"
+        return web.json_response({"ok": True, "result": self._last_result, "status": self._status_payload()})
+
+    async def _run_action(self, request: web.Request) -> web.Response:
+        action = request.match_info["action"]
+        payload = await _json_or_empty(request)
+        if action == "start":
+            name = str(payload.get("name", "")).strip() or None
+            run = self._run_recorder.start(name)
+            self._last_result = f"started route recording {run.name}"
+        elif action == "stop":
+            run = self._run_recorder.stop()
+            self._last_result = f"stopped route recording {run.name if run is not None else 'none'}"
+        elif action == "save":
+            run_path = self._run_recorder.save(self._maps_dir)
+            occupancy_path = self._lidar_mapper.save(self._maps_dir)
+            self._last_result = f"saved learned route data {run_path.name} and {occupancy_path.name}"
+        elif action == "average":
+            self._last_result = "averaged recorded routes"
+        else:
+            return web.json_response({"ok": False, "result": f"unknown run action {action!r}"}, status=400)
+        return web.json_response(
+            {
+                "ok": True,
+                "result": self._last_result,
+                "run_status": self._run_recorder.status(),
+                "average_path": self._run_recorder.average_path(),
+                "status": self._status_payload(),
+            }
+        )
 
     async def _perception_check(self, _request: web.Request) -> web.Response:
         await self._refresh_perception_health()
@@ -349,13 +474,21 @@ class AiAutonomyGui:
         map_payload = self._patrol_map.to_dict() if self._patrol_map is not None else empty_patrol_map().to_dict()
         sport_data = getattr(self._client, "_sport_state", None) if self._client is not None else None
         self._local_map.update_from_sport_state(sport_data)
+        lidar_summary = self._lidar_obstacles.current_summary()
+        self._run_recorder.add_pose(self._local_map.pose if self._local_map.valid else None, lidar_front_m=lidar_summary.front_m)
         observation_age_s = time.time() - self._latest_observation.timestamp if self._latest_observation.timestamp else None
 
         return {
             "status": self._status,
             "video_frames": self._video_frames,
+            "lidar": self._lidar_payload(),
             "current_pose": self._local_map.current_pose_dict(),
             "local_map": self._local_map.to_dict(),
+            "occupancy_map": self._lidar_mapper.to_dict(),
+            "route_learning": {
+                **self._run_recorder.status(),
+                "average_path": self._run_recorder.average_path(),
+            },
             "maps_dir": str(self._maps_dir),
             "map_path": str(self._map_path) if self._map_path is not None else None,
             "map_loaded": self._patrol_map is not None,
@@ -385,13 +518,47 @@ class AiAutonomyGui:
             "autonomy": autonomy,
         }
 
+    def _lidar_payload(self) -> dict[str, Any]:
+        latest = self._latest_lidar or {}
+        return {
+            "raw_messages": self._lidar_raw_messages,
+            "messages": self._lidar_messages,
+            "parse_errors": self._lidar_parse_errors,
+            "last_error": self._lidar_last_error,
+            "age_s": time.time() - self._latest_lidar_ts if self._latest_lidar_ts else None,
+            "point_count": latest.get("point_count", 0),
+            "source_point_count": latest.get("source_point_count", 0),
+            "bounds": latest.get("bounds"),
+            "sample_points": (latest.get("robot_points") or [])[:8],
+            "obstacles": self._lidar_obstacles.current_summary().to_dict(),
+        }
+
+    def _map_pose_from_payload(self, payload: dict[str, Any]) -> Pose2D:
+        waypoint_name = str(payload.get("waypoint", "")).strip()
+        if waypoint_name:
+            if self._patrol_map is None:
+                raise ValueError("load a map before locking to a waypoint")
+            waypoint = self._patrol_map.waypoints.get(waypoint_name)
+            if waypoint is None:
+                raise ValueError(f"unknown waypoint {waypoint_name!r}")
+            return Pose2D(waypoint.x, waypoint.y, math.radians(waypoint.yaw))
+        return Pose2D(
+            float(payload.get("x", 0.0)),
+            float(payload.get("y", 0.0)),
+            math.radians(float(payload.get("yaw", 0.0))),
+        )
+
     def _load_map(self, path: Path) -> None:
         patrol_map = load_patrol_map(path, require_route=True)
         assert self._client is not None
         assert self._perception is not None
         self._patrol_map = patrol_map
         self._map_path = path
-        self._supervisor = AutonomySupervisor(patrol_map, AutonomyNavigator(self._client, self._local_map), self._perception)
+        self._supervisor = AutonomySupervisor(
+            patrol_map,
+            AutonomyNavigator(self._client, self._local_map, self._lidar_obstacles),
+            self._perception,
+        )
 
     async def _unload_map(self) -> None:
         if self._supervisor is not None:
@@ -644,6 +811,8 @@ _INDEX_HTML = """<!doctype html>
       </div>
 
       <label>Map name <input id="mapName" value="new-map"></label>
+      <label>Startup localization waypoint <input id="lockWaypoint" placeholder="home"></label>
+      <button onclick="lockLocalization()">Lock Current Robot To Waypoint/Pose</button>
       <div class="planeWrap">
         <svg id="mapPlane" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
         <div class="planeMeta" id="planeMeta">origin locked, +/-3m</div>
@@ -662,6 +831,15 @@ _INDEX_HTML = """<!doctype html>
         <button onclick="loadSelectedMap()">Load Saved Map</button>
       </div>
       <button onclick="checkPerception()">Check Image Detection</button>
+
+      <h2>LiDAR Mapping</h2>
+      <div class="grid">
+        <button onclick="runAction('start')">Record Run</button>
+        <button onclick="runAction('stop')">Stop Run</button>
+        <button onclick="runAction('average')">Average Runs</button>
+        <button onclick="runAction('save')">Save Runs</button>
+      </div>
+      <pre id="lidarStatus">waiting</pre>
 
       <h2>Autonomy</h2>
       <button class="activate" onclick="act('activate')">Activate AI Mode</button>
@@ -694,6 +872,8 @@ _INDEX_HTML = """<!doctype html>
     let loadedEditorPath = null;
     let lastRobotPose = {x: 0, y: 0, yaw: 0};
     let latestLocalMap = {valid:false, source:"waiting", trail:[]};
+    let latestOccupancy = {cells:[]};
+    let latestAveragePath = [];
     const activeMoves = new Set();
     const planeRangeM = 3.0;
     let moveTimer = null;
@@ -769,6 +949,8 @@ _INDEX_HTML = """<!doctype html>
       const trail = (latestLocalMap.trail || []).map(p => planePoint(p.x, p.y));
       const robot = latestLocalMap.pose ? {...latestLocalMap.pose, ...planePoint(latestLocalMap.pose.x, latestLocalMap.pose.y)} : null;
       const trailPath = trail.map(p => `${p.px.toFixed(2)},${p.py.toFixed(2)}`).join(" ");
+      const averagePath = (latestAveragePath || []).map(p => planePoint(p.x, p.y)).map(p => `${p.px.toFixed(2)},${p.py.toFixed(2)}`).join(" ");
+      const cells = (latestOccupancy.cells || []).map(cell => ({...cell, ...planePoint(cell.x, cell.y)}));
       const routeLines = [];
       const byName = Object.fromEntries(points.map(wp => [wp.name, wp]));
       for (let i = 1; i < map.patrol_route.length; i++) {
@@ -786,12 +968,14 @@ _INDEX_HTML = """<!doctype html>
         <line x1="0" y1="50" x2="100" y2="50" stroke="#596574" stroke-width=".8" vector-effect="non-scaling-stroke"/>
         <line x1="50" y1="0" x2="50" y2="100" stroke="#596574" stroke-width=".8" vector-effect="non-scaling-stroke"/>
         <circle cx="50" cy="50" r="1.4" fill="#f1f1f1"/>
+        ${cells.map(cell => `<rect x="${cell.px - 0.65}" y="${cell.py - 0.65}" width="1.3" height="1.3" fill="#d2644a" opacity="${Math.min(0.72, 0.16 + cell.count / 12)}"/>`).join("")}
         ${routeLines.join("")}
+        ${averagePath ? `<polyline points="${averagePath}" fill="none" stroke="#ff8c42" stroke-width="1.4" vector-effect="non-scaling-stroke" opacity=".9"/>` : ""}
         ${trailPath ? `<polyline points="${trailPath}" fill="none" stroke="#6ee7ff" stroke-width="1.2" vector-effect="non-scaling-stroke" opacity=".82"/>` : ""}
         ${points.map(wp => `<g><circle cx="${wp.px}" cy="${wp.py}" r="${route.has(wp.name) ? 2.4 : 1.8}" fill="${route.has(wp.name) ? "#55a878" : "#ffd11a"}"/><text x="${wp.px + 2.2}" y="${wp.py - 2.2}" fill="#e8e8e8" font-size="3.5">${wp.name}</text></g>`).join("")}
-        ${robot && latestLocalMap.valid ? `<g transform="translate(${robot.px} ${robot.py}) rotate(${-robot.yaw})"><path d="M 0 -3.2 L 2.3 2.5 L 0 1.4 L -2.3 2.5 Z" fill="#f1f1f1" stroke="#080808" stroke-width=".35" vector-effect="non-scaling-stroke"/></g>` : ""}
+        ${robot && latestLocalMap.valid ? `<g transform="translate(${robot.px} ${robot.py}) rotate(${90 - robot.yaw})"><path d="M 0 -3.2 L 2.3 2.5 L 0 1.4 L -2.3 2.5 Z" fill="#f1f1f1" stroke="#080808" stroke-width=".35" vector-effect="non-scaling-stroke"/></g>` : ""}
       `;
-      document.getElementById("planeMeta").textContent = `${map.waypoints.length} wp, trail=${trail.length}, ${latestLocalMap.source || "waiting"}, +/-${planeRangeM}m`;
+      document.getElementById("planeMeta").textContent = `${map.waypoints.length} wp, trail=${trail.length}, occ=${cells.length}, ${latestLocalMap.source || "waiting"}, +/-${planeRangeM}m`;
     }
     function addWaypointFromPlane(event) {
       const svg = document.getElementById("mapPlane");
@@ -827,6 +1011,15 @@ _INDEX_HTML = """<!doctype html>
       await refresh();
       if (!res.ok) alert(data.result || "map load failed");
     }
+    async function lockLocalization() {
+      const waypoint = document.getElementById("lockWaypoint").value.trim();
+      const body = waypoint ? {waypoint} : {x:lastRobotPose.x, y:lastRobotPose.y, yaw:lastRobotPose.yaw};
+      const res = await fetch("/api/localize/lock", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+      const data = await res.json().catch(() => ({result:"bad response"}));
+      await refresh();
+      if (!res.ok) alert(data.result || "localization lock failed");
+      return data;
+    }
     async function checkPerception() {
       const res = await fetch("/api/perception/check", {method:"POST"});
       const data = await res.json().catch(() => ({health:{detail:"bad response"}}));
@@ -843,6 +1036,14 @@ _INDEX_HTML = """<!doctype html>
     async function follow(action) {
       const res = await fetch(`/api/follow/${action}`, {method:"POST"});
       const data = await res.json().catch(() => ({result:"bad response"}));
+      await refresh();
+      if (!res.ok) alert(data.result || `${action} failed`);
+      return data;
+    }
+    async function runAction(action) {
+      const res = await fetch(`/api/runs/${action}`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name: document.getElementById("mapName").value.trim() || "run"})});
+      const data = await res.json().catch(() => ({result:"bad response"}));
+      if (data.average_path) latestAveragePath = data.average_path;
       await refresh();
       if (!res.ok) alert(data.result || `${action} failed`);
       return data;
@@ -941,6 +1142,8 @@ _INDEX_HTML = """<!doctype html>
         document.getElementById("poseYaw").textContent = data.current_pose.yaw.toFixed(1);
       }
       latestLocalMap = data.local_map || latestLocalMap;
+      latestOccupancy = data.occupancy_map || latestOccupancy;
+      latestAveragePath = data.route_learning?.average_path || latestAveragePath;
       renderPlane();
 
       const a = data.autonomy || {};
@@ -958,6 +1161,17 @@ _INDEX_HTML = """<!doctype html>
         `follow_target: ${f.last_target}`,
         `sound: ${f.sound_level ?? "none"} ${f.sound_error || ""}`,
         `tracker: ${tracker.backend || "none"} ready=${tracker.ready} fresh=${tracker.fresh} boxes=${tracker.detection_count ?? 0}`
+      ].join("\\n");
+      const lidar = data.lidar || {};
+      const obs = lidar.obstacles || {};
+      document.getElementById("lidarStatus").textContent = [
+        `raw=${lidar.raw_messages ?? 0} parsed=${lidar.messages ?? 0} errors=${lidar.parse_errors ?? 0}`,
+        `points=${lidar.point_count ?? 0}/${lidar.source_point_count ?? 0} age=${lidar.age_s?.toFixed?.(2) ?? "none"}s`,
+        `front=${obs.front_m ?? "none"} left=${obs.left_m ?? "none"} right=${obs.right_m ?? "none"} rear=${obs.rear_m ?? "none"}`,
+        `front_blocked=${obs.blocked_front} fresh=${obs.fresh}`,
+        `occupancy_cells=${data.occupancy_map?.cell_count ?? 0}`,
+        `run_active=${data.route_learning?.active} runs=${data.route_learning?.run_count ?? 0} samples=${data.route_learning?.active_samples ?? 0} average=${data.route_learning?.average_points ?? 0}`,
+        `${lidar.last_error || ""}`
       ].join("\\n");
       document.getElementById("mapStatus").textContent = [
         `local_map: valid=${data.local_map?.valid} source=${data.local_map?.source} samples=${data.local_map?.samples}`,

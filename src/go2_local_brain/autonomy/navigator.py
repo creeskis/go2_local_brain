@@ -6,6 +6,7 @@ import asyncio
 import math
 from typing import Protocol
 
+from .lidar_map import LidarObstacleField
 from .local_map import LocalMapState, Pose2D, normalize_radians, raw_pose_from_sport_state
 from .map import Waypoint
 
@@ -18,9 +19,15 @@ class RobotMover(Protocol):
 class AutonomyNavigator:
     """Approximate waypoint movement using the same local frame as the map UI."""
 
-    def __init__(self, client: RobotMover, local_map: LocalMapState | None = None) -> None:
+    def __init__(
+        self,
+        client: RobotMover,
+        local_map: LocalMapState | None = None,
+        lidar_obstacles: LidarObstacleField | None = None,
+    ) -> None:
         self._client = client
         self._local_map = local_map
+        self._lidar_obstacles = lidar_obstacles
         self._fallback_origin: Pose2D | None = None
 
     async def move_toward(self, waypoint: Waypoint) -> str:
@@ -62,6 +69,12 @@ class AutonomyNavigator:
             return f"scan at {waypoint.name}"
 
         yaw_error = math.atan2(dy_local, dx_local)
+
+        lidar_summary = self._lidar_obstacles.current_summary() if self._lidar_obstacles is not None else None
+        if lidar_summary is not None and lidar_summary.fresh and lidar_summary.front_m is not None and lidar_summary.front_m < 0.70:
+            turn = self._lidar_obstacles.recommended_avoidance_turn() if self._lidar_obstacles is not None else 0.40
+            await self._client.move(-0.12, 0.0, turn, 0.35)
+            return f"lidar avoid front obstacle {lidar_summary.front_m:.2f}m while heading to {waypoint.name}"
 
         if len(range_obstacle) > 0 and 0.01 < range_obstacle[0] < 0.70:
             await self._client.move(-0.15, 0.0, 0.40, 0.40)

@@ -235,15 +235,17 @@ def _jpeg_from_frame(frame: Any) -> bytes:
 
 def _lidar_payload_from_message(message: Any, *, max_points: int = _MAX_LIDAR_POINTS) -> dict[str, Any] | None:
     data, positions = _extract_lidar_positions(message)
-    points, source_point_count = _points_from_positions(positions)
-    if not points:
+    robot_points, source_point_count = _points_from_positions(positions)
+    if not robot_points:
         return None
-    points = _orient_points_for_three(points)
+    points = _orient_points_for_three(robot_points)
     points = _decimate(points, max_points)
+    robot_points = _decimate(robot_points, max_points)
     distances = [(x * x + y * y + z * z) ** 0.5 for x, y, z in points]
     bounds = _point_bounds(points)
     return {
         "points": points,
+        "robot_points": robot_points,
         "distances": distances,
         "bounds": bounds,
         "point_count": len(points),
