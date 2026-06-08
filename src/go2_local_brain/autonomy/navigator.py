@@ -29,6 +29,7 @@ class AutonomyNavigator:
         current_x = 0.0
         current_y = 0.0
         current_yaw = 0.0
+        range_obstacle = [0.0, 0.0, 0.0, 0.0]
 
         if sport_state and isinstance(sport_state, dict):
             pos = sport_state.get("position", [0.0, 0.0, 0.0])
@@ -41,6 +42,9 @@ class AutonomyNavigator:
                 rpy = imu.get("rpy", [0.0, 0.0, 0.0])
                 if len(rpy) >= 3:
                     current_yaw = rpy[2]
+            
+            # Extract the raw hardware obstacle range metrics (in meters)
+            range_obstacle = sport_state.get("range_obstacle", [0.0, 0.0, 0.0, 0.0])
 
         # 2. Calculate absolute world delta gaps
         dx_abs = waypoint.x - current_x
@@ -66,11 +70,17 @@ class AutonomyNavigator:
             await self._client.move(0.0, 0.0, turn, 0.35)
             return f"turn toward {waypoint.name} (error: {yaw_error:.2f} rad)"
 
-        # 6. Walk forward confidently if heading is aligned
+        # 5.5 LIVE OBSTACLE AVOIDANCE GUARD
+        # Check if the front distance sonar/LiDAR segment reads an obstacle closer than 0.70 meters
+        if len(range_obstacle) > 0 and 0.01 < range_obstacle[0] < 0.70:
+            # Command an immediate fallback maneuver: back up slightly and pivot left to clear space
+            await self._client.move(-0.15, 0.0, 0.40, 0.40)
+            return f"avoiding obstacle! object detected front: {range_obstacle[0]:.2f}m"
+
+        # 6. Walk forward confidently if heading is aligned and path is clear
         step_duration = min(0.55, max(0.25, distance * 0.25))
         await self._client.move(0.25, 0.0, 0.0, step_duration)
         return f"step toward {waypoint.name} (dist: {distance:.2f}m)"
-
     async def scan(self) -> None:
         """Perform a small visual scan without committing to travel."""
         await self._client.move(0.0, 0.0, 0.45, 0.35)
