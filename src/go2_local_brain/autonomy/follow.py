@@ -79,7 +79,7 @@ class HumanFollowController:
         self._last_action = command.reason
         return command
 
-    def plan(self, observation: Observation, sound_cue: SoundCue | None = None) -> FollowCommand:
+def plan(self, observation: Observation, sound_cue: SoundCue | None = None) -> FollowCommand:
         target = best_human_detection(observation)
         if target is None:
             if sound_cue is not None and time.time() - sound_cue.timestamp < 2.0:
@@ -96,13 +96,16 @@ class HumanFollowController:
         else:
             center_error = center_x - 0.5
 
-        turn = 0.0 if abs(center_error) < self._deadband else _clamp(center_error * 1.4, -self._max_turn, self._max_turn)
+        # FIX: Added a negative sign to center_error (-center_error).
+        # This ensures a human on the right (positive error) results in a negative turn (turn right).
+        turn = 0.0 if abs(center_error) < self._deadband else _clamp(-center_error * 1.4, -self._max_turn, self._max_turn)
+        
         if height is None:
             forward = 0.0
         else:
             distance_error = self._target_height - height
-            forward = _clamp(distance_error * 0.7, -0.12, self._max_forward)
-            if abs(distance_error) < 0.08:
+            forward = _clamp(distance_error * 1.6, -0.30, self._max_forward)
+            if abs(distance_error) < 0.04:
                 forward = 0.0
 
         self._last_target = f"person:{target.confidence:.2f}"
