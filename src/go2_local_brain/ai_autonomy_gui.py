@@ -294,6 +294,14 @@ class AiAutonomyGui:
     def _status_payload(self) -> dict[str, Any]:
         autonomy = self._supervisor.status().__dict__ if self._supervisor is not None else None
         map_payload = self._patrol_map.to_dict() if self._patrol_map is not None else empty_patrol_map().to_dict()
+        
+        # DIAGNOSTIC ADDITION: Scan the WebRTC client for internal tracking dictionaries
+        raw_telemetry = {}
+        if self._client is not None:
+            for field_name in ["_sport_state", "sport_state", "_state", "state", "_telemetry"]:
+                if hasattr(self._client, field_name):
+                    raw_telemetry[field_name] = getattr(self._client, field_name)
+
         return {
             "status": self._status,
             "video_frames": self._video_frames,
@@ -303,6 +311,10 @@ class AiAutonomyGui:
             "map": map_payload,
             "perception": self._perception_health.__dict__,
             "observation": self._latest_observation.to_dict(),
+            
+            # Injects the raw low-level state telemetry straight into your browser data stream
+            "robot_internal_telemetry": raw_telemetry,
+            
             "follow": {
                 "active": self._follow_task is not None and not self._follow_task.done(),
                 "source": self._follow_source,
