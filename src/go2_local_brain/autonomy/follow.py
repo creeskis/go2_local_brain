@@ -50,10 +50,10 @@ class HumanFollowController:
         self,
         mover: FollowMover,
         *,
-        target_height: float = 0.45,
+        target_height: float = 0.60,
         deadband: float = 0.12,
-        max_forward: float = 0.22,
-        max_turn: float = 0.45,
+        max_forward: float = 1.15,
+        max_turn: float = 0.55,
         duration_s: float = 0.45,
     ) -> None:
         self._mover = mover
@@ -104,7 +104,7 @@ class HumanFollowController:
                 forward = 0.0
             else:
                 distance_error = self._target_height - height
-                forward = _clamp(distance_error * 1.6, -0.30, self._max_forward)
+                forward = _clamp(distance_error * 2.2, -0.40, self._max_forward)
                 if abs(distance_error) < 0.04:
                     forward = 0.0
     
