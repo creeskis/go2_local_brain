@@ -102,7 +102,7 @@ class AutonomySupervisor:
             events=list(self._events),
         )
 
-   async def step_once(self) -> None:
+    async def step_once(self) -> None:
         """Run one patrol decision. Useful for tests and future manual stepping."""
         if self._state == "paused":
             return
