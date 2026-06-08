@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from go2_local_brain.autonomy.perception import (
     CameraOnlyPerceptionProvider,
     Detection,
     Observation,
+    PerceptionHealth,
     PerceptionProvider,
     YoloPerceptionProvider,
     best_human_detection,
@@ -42,6 +44,24 @@ class StaticPerception(PerceptionProvider):
 
     async def observe(self) -> Observation:
         return self.observation
+
+    async def health(self) -> PerceptionHealth:
+        return PerceptionHealth(True, "test", "ready")
+
+
+class SequencePerception(PerceptionProvider):
+    def __init__(self, observations: list[Observation], health: PerceptionHealth | None = None) -> None:
+        self.observations = observations
+        self.index = 0
+        self._health = health or PerceptionHealth(True, "yolo", "ready")
+
+    async def observe(self) -> Observation:
+        observation = self.observations[min(self.index, len(self.observations) - 1)]
+        self.index += 1
+        return observation
+
+    async def health(self) -> PerceptionHealth:
+        return self._health
 
 
 def _map() -> PatrolMap:
@@ -263,6 +283,57 @@ class FollowControllerTests(unittest.TestCase):
         self.assertEqual(command.vx, 0.0)
         self.assertGreater(command.vyaw, 0.0)
         self.assertEqual(controller.last_target, "sound")
+
+    @unittest.skipIf(importlib.util.find_spec("aiohttp") is None, "aiohttp not installed")
+    def test_gui_follow_step_observes_fresh_frame(self) -> None:
+        from go2_local_brain.ai_autonomy_gui import AiAutonomyGui
+
+        client = FakeClient()
+        gui = _test_gui(AiAutonomyGui, detector="yolo")
+        gui._follow = HumanFollowController(client)
+        gui._latest_observation = Observation(timestamp=1.0, frame_available=True)
+        gui._perception = SequencePerception(
+            [
+                Observation(
+                    timestamp=2.0,
+                    frame_available=True,
+                    frame_width=640,
+                    frame_height=480,
+                    detections=[Detection("person", 0.9, x=480, y=240, width=90, height=120)],
+                )
+            ]
+        )
+        command = asyncio.run(gui._follow_step())
+        self.assertIsNotNone(command)
+        assert command is not None
+        self.assertIn("person", gui._follow.last_target)
+        self.assertLess(command.vyaw, 0.0)
+        self.assertEqual(gui._latest_observation.timestamp, 2.0)
+
+    @unittest.skipIf(importlib.util.find_spec("aiohttp") is None, "aiohttp not installed")
+    def test_gui_follow_start_rejects_camera_only_detection(self) -> None:
+        from go2_local_brain.ai_autonomy_gui import AiAutonomyGui
+
+        gui = _test_gui(AiAutonomyGui, detector="camera")
+        gui._perception = SequencePerception([Observation(timestamp=1.0, frame_available=True)])
+        error = asyncio.run(gui._follow_start_error())
+        self.assertIn("--detector yolo", error)
+
+
+def _test_gui(gui_cls: type, *, detector: str) -> object:
+    return gui_cls(
+        "127.0.0.1",
+        0,
+        Path("."),
+        None,
+        False,
+        detector,
+        "yolov8n.pt",
+        0.55,
+        "",
+        False,
+        "visual",
+    )
 
 
 if __name__ == "__main__":

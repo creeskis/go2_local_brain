@@ -12,7 +12,7 @@ from typing import Any
 
 from aiohttp import web
 
-from .autonomy.follow import HumanFollowController, LocalSoundLevelProvider, SoundCue
+from .autonomy.follow import FollowCommand, HumanFollowController, LocalSoundLevelProvider, SoundCue
 from .autonomy.local_map import LocalMapState
 from .autonomy.map import (
     PatrolMap,
@@ -281,6 +281,9 @@ class AiAutonomyGui:
         if action == "start":
             if self._follow is None:
                 return web.json_response({"ok": False, "result": "follow controller is not ready"}, status=503)
+            ready_error = await self._follow_start_error()
+            if ready_error:
+                return web.json_response({"ok": False, "result": ready_error, "status": self._status_payload()}, status=400)
             if self._supervisor is not None:
                 await self._supervisor.pause()
             if self._follow_task is None or self._follow_task.done():
@@ -434,16 +437,31 @@ class AiAutonomyGui:
 
     async def _follow_loop(self) -> None:
         while True:
-            await self._follow_step()
-            await asyncio.sleep(0.05)
+            command = await self._follow_step()
+            sleep_s = max(0.12, min(0.35, (command.duration_s * 0.75) if command is not None else 0.20))
+            await asyncio.sleep(sleep_s)
 
-    async def _follow_step(self) -> None:
+    async def _follow_step(self) -> FollowCommand | None:
         if self._follow is None:
             self._follow_last_action = "not ready"
-            return
+            return None
+        observation = await self._observe_once()
         sound_cue = await self._sound_cue()
-        command = await self._follow.step(self._latest_observation, sound_cue)
+        command = await self._follow.step(observation, sound_cue)
         self._follow_last_action = command.reason
+        return command
+
+    async def _follow_start_error(self) -> str:
+        if self._follow_source in {"visual", "visual-or-sound"}:
+            await self._refresh_perception_health()
+            observation = await self._observe_once()
+            if self._detector != "yolo":
+                return "human follow needs --detector yolo; camera-only mode cannot produce person boxes"
+            if not observation.frame_available:
+                return "human follow is waiting for a video frame"
+            if not self._perception_health.ready:
+                return f"human follow perception is not ready: {self._perception_health.detail}"
+        return ""
 
     async def _sound_cue(self) -> SoundCue | None:
         if self._follow_source == "visual":
