@@ -1,6 +1,6 @@
 # go2_local_brain
 
-`go2_local_brain` is a local Python control brain for Cooper's **Unitree Go2 Air**. It connects to the robot over WebRTC, asks a local Ollama model to choose robot tools, and exposes several command-line and browser GUIs for manual driving, AI commands, live video, LiDAR experiments, autonomy maps, human detection, and follow behavior.
+`go2_local_brain` is a local Python control brain for the **Unitree Go2 Air**. It connects to the robot over WebRTC, asks a local Ollama model to choose robot tools, and exposes several command-line and browser GUIs for manual driving, AI commands, live video, LiDAR experiments, autonomy maps, human detection, and follow behavior.
 
 This README is written as both:
 
