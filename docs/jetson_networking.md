@@ -20,7 +20,14 @@ Go2 eth0:        10.123.0.1/24
 
 ## Recommended WebRTC Target
 
-Keep the app pointed at the robot wlan0 address unless testing proves otherwise:
+When the Jetson is only connected through the dog Ethernet link, use the dog Ethernet-side `10.123.0.1` address:
+
+```env
+GO2_IP=10.123.0.1
+GO2_WEBRTC_METHOD=LocalSTA
+```
+
+When running from WSL/laptop over Wi-Fi, use the robot wlan0 address:
 
 ```env
 GO2_IP=192.168.123.121
@@ -28,6 +35,14 @@ GO2_WEBRTC_METHOD=LocalSTA
 ```
 
 `unitree_webrtc_connect` supports `LocalAP`, `LocalSTA`, and `Remote`. For this repo, `LocalSTA` is the correct default for a robot already joined to the local network. `LocalAP` is for the robot's direct Wi-Fi AP mode. `Remote` is the Unitree cloud/TURN path and needs account credentials.
+
+If this hangs from the Jetson:
+
+```bash
+ping -c 3 -W 2 10.123.0.1
+```
+
+stop testing WebRTC. The Jetson cannot reach the dog Ethernet interface yet. Check cable, carrier, dog `eth0` address, and Jetson `enP8p1s0` address first.
 
 ## Why WebRTC Failed After Bridging
 
@@ -76,7 +91,53 @@ This exposes only the cockpit port and does not require dog-side port forwarding
 
 This is the cleanest long-term answer. Give the Jetson a direct operator-network interface, leave the dog Ethernet as `10.123.0.2/24`, and avoid using the robot as the operator network bridge.
 
-### Option C: Temporary Dog NAT For Jetson Internet
+### Option C: Narrow Cockpit Port Forward
+
+This is the preferred Ethernet-only setup when no USB Wi-Fi adapter is available:
+
+```text
+Jetson browser cockpit: 10.123.0.2:8775
+Dog wlan0 forward:      192.168.123.121:8775 -> 10.123.0.2:8775
+Dog WebRTC target:      10.123.0.1
+```
+
+It avoids broad Jetson internet NAT and forwards only the browser cockpit port.
+
+On the dog:
+
+```bash
+sudo ./scripts/setup_dog_cockpit_forward.sh
+```
+
+On the Jetson:
+
+```bash
+sudo ./scripts/setup_jetson_eth_static.sh
+```
+
+In Jetson `.env`:
+
+```env
+GO2_IP=10.123.0.1
+GO2_WEBRTC_METHOD=LocalSTA
+GO2_GUI_HOST=0.0.0.0
+GO2_GUI_PORT=8775
+```
+
+From the laptop/WSL browser:
+
+```text
+http://192.168.123.121:8775
+```
+
+Rollback:
+
+```bash
+sudo ./scripts/rollback_dog_cockpit_forward.sh
+sudo ./scripts/rollback_jetson_eth_static.sh
+```
+
+### Option D: Temporary Dog NAT For Jetson Internet
 
 Use the scripts in this repo only for runtime testing:
 
@@ -97,6 +158,8 @@ Rollback on the dog:
 ```bash
 sudo ./scripts/rollback_dog_jetson_route.sh
 ```
+
+This is broader than the cockpit forward and should not be the first choice while debugging WebRTC.
 
 These scripts do not persist across reboot unless the robot firmware or shell environment preserves runtime state.
 
@@ -121,11 +184,13 @@ On the Jetson:
 ip addr
 ip route
 arp -a
-ping -c 3 10.123.0.1
-ping -c 3 192.168.123.121
-ping -c 3 8.8.8.8
-nc -vz 192.168.123.121 9991
-curl http://192.168.123.121:9991/con_notify
+ip -br link show enP8p1s0
+cat /sys/class/net/enP8p1s0/carrier
+ping -c 3 -W 2 10.123.0.1
+ping -c 3 -W 2 192.168.123.121
+ping -c 3 -W 2 8.8.8.8
+nc -vz -w 3 10.123.0.1 9991
+curl --max-time 5 http://10.123.0.1:9991/con_notify
 pip show unitree-webrtc-connect unitree_webrtc_connect
 ./scripts/diagnose_webrtc.sh
 ```

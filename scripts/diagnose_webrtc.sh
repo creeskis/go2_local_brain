@@ -22,20 +22,34 @@ section "local addresses"
 run ip addr
 run ip route
 run arp -a
+for iface in enP8p1s0 eth0 wlan0; do
+  if [[ -d "/sys/class/net/${iface}" ]]; then
+    section "link ${iface}"
+    run ip -br link show "$iface"
+    if [[ -r "/sys/class/net/${iface}/carrier" ]]; then
+      echo "carrier=$(cat "/sys/class/net/${iface}/carrier" 2>/dev/null || echo unknown)"
+    fi
+    if command -v ethtool >/dev/null 2>&1; then
+      run ethtool "$iface"
+    fi
+  fi
+done
 
 section "robot reachability"
-run ping -c 3 "$DOG_ETH_GATEWAY"
-run ping -c 3 "$ROBOT_WLAN_IP"
-run ping -c 3 "$ROBOT_ETH_IP"
-run ping -c 3 8.8.8.8
+run ping -c 3 -W 2 "$DOG_ETH_GATEWAY"
+run ping -c 3 -W 2 "$ROBOT_WLAN_IP"
+run ping -c 3 -W 2 "$ROBOT_ETH_IP"
+run ping -c 3 -W 2 8.8.8.8
 
 section "signaling reachability"
 if command -v nc >/dev/null 2>&1; then
-  run nc -vz "$ROBOT_WLAN_IP" 9991
-  run nc -vz "$ROBOT_ETH_IP" 9991
+  run nc -vz -w 3 "$DOG_ETH_GATEWAY" 9991
+  run nc -vz -w 3 "$ROBOT_WLAN_IP" 9991
+  run nc -vz -w 3 "$ROBOT_ETH_IP" 9991
 else
   echo "nc not installed"
 fi
+run curl --max-time 5 "http://${DOG_ETH_GATEWAY}:9991/con_notify"
 run curl --max-time 5 "http://${ROBOT_WLAN_IP}:9991/con_notify"
 run curl --max-time 5 "http://${ROBOT_ETH_IP}:9991/con_notify"
 
@@ -47,3 +61,7 @@ section "recommended app env"
 echo "GO2_IP=${ROBOT_WLAN_IP}"
 echo "GO2_WEBRTC_METHOD=LocalSTA"
 echo "GO2_AES_128_KEY="
+echo
+echo "If running on the Jetson Ethernet-only link and ${DOG_ETH_GATEWAY} is reachable, use:"
+echo "GO2_IP=${DOG_ETH_GATEWAY}"
+echo "GO2_WEBRTC_METHOD=LocalSTA"

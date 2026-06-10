@@ -42,7 +42,16 @@ else
   run ip addr add "$DOG_ETH_IP" dev "$DOG_ETH_IF"
 fi
 
+echo
+echo "Dog Ethernet link state:"
+ip -br link show "$DOG_ETH_IF"
+if [[ -r "/sys/class/net/${DOG_ETH_IF}/carrier" ]]; then
+  echo "carrier=$(cat "/sys/class/net/${DOG_ETH_IF}/carrier")"
+fi
+
 run sysctl -w net.ipv4.ip_forward=1
+run sysctl -w "net.ipv4.conf.${DOG_ETH_IF}.send_redirects=0"
+run sysctl -w "net.ipv4.conf.${DOG_ETH_IF}.rp_filter=0"
 ensure_filter_rule FORWARD -i "$DOG_ETH_IF" -o "$DOG_WIFI_IF" -j ACCEPT
 ensure_filter_rule FORWARD -i "$DOG_WIFI_IF" -o "$DOG_ETH_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT
 if iptables -t nat -C POSTROUTING -s "$JETSON_CIDR" -o "$DOG_WIFI_IF" -j MASQUERADE >/dev/null 2>&1; then

@@ -2,7 +2,7 @@
 
 This is the recommended layout when the Jetson is mounted near the robot and the WSL instance is only used as a browser/control station.
 
-If the Jetson is plugged into the dog Ethernet port and the laptop/WSL instance only sees the dog over Wi-Fi, read [jetson_networking.md](jetson_networking.md) before changing routes.
+If the Jetson is plugged into the dog Ethernet port and the laptop/WSL instance only sees the dog over Wi-Fi, read [jetson_networking.md](jetson_networking.md) before changing routes. Prefer the narrow cockpit port forward over broad NAT.
 
 ## Target Architecture
 
