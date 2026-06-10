@@ -43,6 +43,7 @@ from .autonomy.perception import (
 from .autonomy.route_learning import PathRunRecorder
 from .autonomy.supervisor import AutonomySupervisor
 from .config import load_config
+from .brain.local_llm import LocalRobotBrain
 from .driver.webrtc_client import Go2Config, Go2WebRTCClient
 from .viewer import _jpeg_from_frame, _lidar_payload_from_message
 
@@ -85,6 +86,7 @@ class AiAutonomyGui:
         self._follow_source = follow_source
         self._lidar_transform = lidar_transform or LidarTransform()
         self._client: Go2WebRTCClient | None = None
+        self._brain: LocalRobotBrain | None = None
         self._supervisor: AutonomySupervisor | None = None
         self._patrol_map: PatrolMap | None = None
         self._local_map = LocalMapState()
@@ -135,6 +137,11 @@ class AiAutonomyGui:
                 exploration_max_duration_s=cfg.exploration_max_duration_s,
             )
         )
+        # LLM brain wrapping the same driver. Created here so the GUI's
+        # /api/brain endpoint can route typed prompts through ollama tool
+        # calls into the existing driver — same safety clamps, same
+        # auth gating.
+        self._brain = LocalRobotBrain(self._client, model=cfg.ollama_model)
 
         app = web.Application(client_max_size=1024 * 1024)
         app.router.add_get("/", self._index)
@@ -155,6 +162,7 @@ class AiAutonomyGui:
         app.router.add_post("/api/manual/move", self._manual_move)
         app.router.add_post("/api/manual/stop", self._manual_stop)
         app.router.add_post("/api/manual/sport", self._manual_sport)
+        app.router.add_post("/api/brain", self._brain_prompt)
         app.router.add_post("/api/follow/{action}", self._follow_action)
         app.router.add_post("/api/autonomy/{action}", self._autonomy_action)
 
@@ -459,6 +467,32 @@ class AiAutonomyGui:
             return web.json_response({"ok": False, "result": f"{name} failed: {exc}"}, status=400)
         self._last_result = f"manual sport {name}"
         return web.json_response({"ok": True, "result": self._last_result, "status": self._status_payload()})
+
+    async def _brain_prompt(self, request: web.Request) -> web.Response:
+        """Run an LLM tool call from a typed prompt.
+
+        POST body: ``{"prompt": "go forward a bit"}``.
+
+        On success returns ``{"ok": True, "result": "called robot_step_forward(...)"}``.
+        Brain failures (no tool call returned, unknown tool, etc.) emit a
+        driver.stop() — that's the safety default and is reflected in the
+        returned result string.
+        """
+        if self._brain is None:
+            return web.json_response({"ok": False, "result": "brain not ready"}, status=503)
+        payload = await _json_or_empty(request)
+        prompt = str(payload.get("prompt", "")).strip()
+        if not prompt:
+            return web.json_response({"ok": False, "result": "prompt is required"}, status=400)
+        # Pause autonomy so the brain doesn't fight the patrol controller.
+        await self._pause_autonomy_for_manual()
+        try:
+            result = await self._brain.handle(prompt)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("brain prompt failed")
+            return web.json_response({"ok": False, "result": f"brain error: {exc}"}, status=500)
+        self._last_result = f"brain: {result}"
+        return web.json_response({"ok": True, "result": result, "status": self._status_payload()})
 
     async def _follow_action(self, request: web.Request) -> web.Response:
         action = request.match_info["action"]
@@ -992,6 +1026,23 @@ _INDEX_HTML = """<!doctype html>
         <button onclick="follow('step')">Follow Step</button>
       </div>
       <button class="stop" onclick="follow('stop')">Stop Follow</button>
+
+      <h2>Brain (LLM prompts)</h2>
+      <textarea id="brainPrompt" rows="3" placeholder="Type a command e.g. 'walk forward then turn left'" style="width:100%;box-sizing:border-box;"></textarea>
+      <button onclick="sendBrainPrompt()" style="width:100%;margin-top:4px;">Send to brain</button>
+      <pre id="brainResult" style="max-height:120px;overflow:auto;">brain ready</pre>
+
+      <h2>Quick override</h2>
+      <div class="grid">
+        <button onclick="sportAction('StandUp')">Stand</button>
+        <button onclick="sportAction('Sit')">Sit</button>
+        <button class="stop" onclick="manualStop()">STOP</button>
+      </div>
+      <p style="margin-top:4px;font-size:0.85em;color:#888;">
+        WASD = move, Q/E = yaw, Space = stop. Click here first to capture keys.
+      </p>
+      <button id="wasdToggle" onclick="toggleWasd()" style="width:100%;">Enable WASD</button>
+
       <h2>Status</h2>
       <pre id="status">waiting</pre>
       <h2>Map</h2>
@@ -1248,6 +1299,103 @@ _INDEX_HTML = """<!doctype html>
       if (!res.ok) alert(data.result || `${name} failed`);
       return data;
     }
+    // Sport-command quick buttons (Stand / Sit). The "STOP" button uses the
+    // existing manualStop() which routes through /api/manual/stop.
+    async function sportAction(name) { return manualSport(name); }
+
+    // Brain prompt -- types into the textarea then POST /api/brain.
+    async function sendBrainPrompt() {
+      const ta = document.getElementById("brainPrompt");
+      const out = document.getElementById("brainResult");
+      const prompt = (ta.value || "").trim();
+      if (!prompt) { out.textContent = "(empty prompt)"; return; }
+      out.textContent = "thinking...";
+      try {
+        const res = await fetch("/api/brain", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({prompt})});
+        const data = await res.json().catch(() => ({result:"bad response"}));
+        out.textContent = data.result || `(${res.status})`;
+      } catch (exc) {
+        out.textContent = "brain error: " + exc;
+      }
+      await refresh();
+    }
+    // Submit on Ctrl+Enter for a less mouse-heavy flow.
+    document.addEventListener("DOMContentLoaded", () => {
+      const ta = document.getElementById("brainPrompt");
+      if (!ta) return;
+      ta.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+          ev.preventDefault();
+          sendBrainPrompt();
+        }
+      });
+    });
+
+    // WASD keyboard driving. Off by default so it can't fight a text input
+    // anywhere else on the page. Click the toggle to enable; click again or
+    // press Escape to disable. Each held key sends a fresh manual move at
+    // ~10 Hz, and Space sends a hard stop.
+    let wasdEnabled = false;
+    const wasdHeld = new Set();
+    let wasdInterval = null;
+    const WASD_VX = 0.30, WASD_VY = 0.25, WASD_VYAW = 0.60, WASD_DURATION = 0.25;
+    function toggleWasd() {
+      wasdEnabled = !wasdEnabled;
+      const btn = document.getElementById("wasdToggle");
+      if (wasdEnabled) {
+        btn.textContent = "Disable WASD (active)";
+        btn.style.background = "#264";
+      } else {
+        btn.textContent = "Enable WASD";
+        btn.style.background = "";
+        wasdHeld.clear();
+        if (wasdInterval) { clearInterval(wasdInterval); wasdInterval = null; }
+        manualStop();
+      }
+    }
+    function wasdVelocity() {
+      let vx = 0, vy = 0, vyaw = 0;
+      if (wasdHeld.has("w")) vx += WASD_VX;
+      if (wasdHeld.has("s")) vx -= WASD_VX;
+      if (wasdHeld.has("a")) vy += WASD_VY;
+      if (wasdHeld.has("d")) vy -= WASD_VY;
+      if (wasdHeld.has("q")) vyaw += WASD_VYAW;
+      if (wasdHeld.has("e")) vyaw -= WASD_VYAW;
+      return {vx, vy, vyaw};
+    }
+    async function wasdTick() {
+      const v = wasdVelocity();
+      if (!v.vx && !v.vy && !v.vyaw) return;
+      const body = {vx: v.vx, vy: v.vy, vyaw: v.vyaw, duration_s: WASD_DURATION};
+      try {
+        await fetch("/api/manual/move", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+      } catch (_) { /* swallow transient errors during fast key changes */ }
+    }
+    document.addEventListener("keydown", (ev) => {
+      if (!wasdEnabled) return;
+      // Don't fight text inputs / textareas.
+      const tag = (document.activeElement && document.activeElement.tagName) || "";
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      const k = ev.key.toLowerCase();
+      if (k === " " || k === "spacebar") { ev.preventDefault(); manualStop(); return; }
+      if (k === "escape") { toggleWasd(); return; }
+      if (!"wasdqe".includes(k)) return;
+      ev.preventDefault();
+      if (!wasdHeld.has(k)) {
+        wasdHeld.add(k);
+        if (!wasdInterval) wasdInterval = setInterval(wasdTick, 100);
+      }
+    });
+    document.addEventListener("keyup", (ev) => {
+      if (!wasdEnabled) return;
+      const k = ev.key.toLowerCase();
+      if (!wasdHeld.has(k)) return;
+      wasdHeld.delete(k);
+      if (!wasdHeld.size) {
+        clearInterval(wasdInterval); wasdInterval = null;
+        manualStop();
+      }
+    });
     function imageRectInPanel() {
       const panel = document.getElementById("videoPanel");
       const img = document.getElementById("video");

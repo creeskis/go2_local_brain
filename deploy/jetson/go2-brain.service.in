@@ -1,0 +1,23 @@
+[Unit]
+Description=go2_local_brain AI autonomy GUI (auto-start)
+After=network-online.target go2-ollama.service
+Wants=network-online.target
+Requires=go2-ollama.service
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO@
+Environment=HOME=@HOME@
+EnvironmentFile=-@REPO@/.env
+EnvironmentFile=-@HOME@/.go2/env.local
+# Bind to all interfaces. The bearer-token auth (printed in the journal at
+# startup) gates POST /api/... so the LAN can see but not drive without it.
+ExecStart=@VENV@/bin/python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

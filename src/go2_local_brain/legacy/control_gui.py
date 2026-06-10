@@ -11,9 +11,9 @@ from typing import Any
 
 from aiohttp import web
 
-from .config import load_config
-from .driver.webrtc_client import Go2Config, Go2WebRTCClient
-from .viewer import _jpeg_from_frame
+from ..config import load_config
+from ..driver.webrtc_client import Go2Config, Go2WebRTCClient
+from ..viewer import _jpeg_from_frame
 
 log = logging.getLogger(__name__)
 

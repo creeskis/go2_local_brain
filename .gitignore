@@ -5,3 +5,4 @@ __pycache__/
 build/
 dist/
 .env
+.commit_msg.txt

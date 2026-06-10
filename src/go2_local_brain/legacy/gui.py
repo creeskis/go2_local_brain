@@ -11,10 +11,10 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 
-from .brain.local_llm import LocalRobotBrain
-from .config import load_config
-from .driver.webrtc_client import Go2Config, Go2WebRTCClient
-from .viewer import _jpeg_from_frame, _lidar_payload_from_message
+from ..brain.local_llm import LocalRobotBrain
+from ..config import load_config
+from ..driver.webrtc_client import Go2Config, Go2WebRTCClient
+from ..viewer import _jpeg_from_frame, _lidar_payload_from_message
 
 log = logging.getLogger(__name__)
 

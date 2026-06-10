@@ -1,0 +1,22 @@
+[Unit]
+Description=Ollama for go2_local_brain (auto-pull model)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Environment=HOME=@HOME@
+EnvironmentFile=-@REPO@/.env
+EnvironmentFile=-@HOME@/.go2/env.local
+# Ollama binds to 127.0.0.1:11434 by default. We expose it on all interfaces
+# so a remote brain (if you ever split the deployment) can reach it; on a
+# Jetson the dog NAT keeps this from being world-reachable.
+Environment=OLLAMA_HOST=0.0.0.0:11434
+ExecStartPre=/bin/sh -c 'ollama serve >/dev/null 2>&1 & sleep 3; until ollama list >/dev/null 2>&1; do sleep 1; done; ollama pull "$${OLLAMA_MODEL:-gemma3:4b}"'
+ExecStart=/usr/local/bin/ollama serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
