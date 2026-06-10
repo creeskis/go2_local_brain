@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 from go2_local_brain.driver.webrtc_client import (
     Go2Config,
     Go2WebRTCClient,
+    _build_unitree_connection,
     _extract_motion_mode_name,
     _friendly_connect_error,
     _method_name,
@@ -265,6 +266,33 @@ class WebRTCConfigTests(unittest.TestCase):
             name = "LocalSTA"
 
         self.assertEqual(_method_name(Method()), "LocalSTA")
+
+    def test_build_connection_prefers_positional_method(self) -> None:
+        calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        def factory(*args: Any, **kwargs: Any) -> object:
+            calls.append((args, kwargs))
+            return {"ok": True}
+
+        method = object()
+        conn = _build_unitree_connection(factory, method, {"connectionMethod": method, "ip": "192.168.123.121"})
+        self.assertEqual(conn, {"ok": True})
+        self.assertEqual(calls[0][0], (method,))
+        self.assertEqual(calls[0][1]["ip"], "192.168.123.121")
+
+    def test_build_connection_falls_back_to_legacy_aes_key_name(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        def factory(*_args: Any, **kwargs: Any) -> object:
+            calls.append(kwargs)
+            if "aes_128_key" in kwargs:
+                raise TypeError("unexpected keyword")
+            return {"ok": True}
+
+        method = object()
+        conn = _build_unitree_connection(factory, method, {"connectionMethod": method, "ip": "192.168.123.121"}, "key")
+        self.assertEqual(conn, {"ok": True})
+        self.assertIn("aesKey", calls[-1])
 
 
 class MotionModeNameExtractorTests(unittest.TestCase):

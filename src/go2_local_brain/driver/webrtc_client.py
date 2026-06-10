@@ -168,13 +168,7 @@ class Go2WebRTCClient:
             kwargs["aes_128_key"] = self._cfg.aes_128_key
         self._log_connection_plan(method, kwargs)
 
-        try:
-            self._conn = UnitreeWebRTCConnection(**kwargs)
-        except TypeError:
-            kwargs.pop("aes_128_key", None)
-            if self._cfg.aes_128_key:
-                kwargs["aesKey"] = self._cfg.aes_128_key
-            self._conn = UnitreeWebRTCConnection(**kwargs)
+        self._conn = _build_unitree_connection(UnitreeWebRTCConnection, method, kwargs, self._cfg.aes_128_key)
 
         try:
             await self._conn.connect()
@@ -688,6 +682,30 @@ def _merge_sport_cmds(base: dict[str, int], *extras: dict[str, int]) -> dict[str
         for name, api_id in dict(table).items():
             merged.setdefault(name, api_id)
     return merged
+
+
+def _build_unitree_connection(factory: Any, method: Any, kwargs: dict[str, Any], aes_key: str | None = None) -> Any:
+    """Build Unitree connection using the positional method form shown upstream."""
+    positional_kwargs = {key: value for key, value in kwargs.items() if key != "connectionMethod"}
+    attempts: list[tuple[str, dict[str, Any], bool]] = [
+        ("positional_aes_128_key", dict(positional_kwargs), True),
+        ("keyword_aes_128_key", dict(kwargs), True),
+        ("positional_aesKey", dict(positional_kwargs), False),
+        ("keyword_aesKey", dict(kwargs), False),
+    ]
+    last_error: TypeError | None = None
+    for _name, attempt_kwargs, use_modern_key in attempts:
+        if aes_key:
+            attempt_kwargs["aes_128_key" if use_modern_key else "aesKey"] = aes_key
+        try:
+            if "positional" in _name:
+                return factory(method, **attempt_kwargs)
+            return factory(**attempt_kwargs)
+        except TypeError as exc:
+            last_error = exc
+            continue
+    assert last_error is not None
+    raise last_error
 
 
 def _resolve_webrtc_method(enum: Any, requested: str) -> Any:
