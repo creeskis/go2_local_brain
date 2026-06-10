@@ -100,6 +100,8 @@ If the script is not executable after cloning:
 chmod +x scripts/run_jetson_cockpit.sh
 ```
 
+The run script reads `.env` before starting Python, so the same file controls manual runs and systemd runs.
+
 ## Systemd Service
 
 The service template assumes this path:
@@ -108,7 +110,17 @@ The service template assumes this path:
 /home/jetson/robotics/go2_local_brain
 ```
 
-If your user or path differs, edit the service before installing it.
+If your user or path differs, use the installer script. It renders the service with the current username, group, and repo path:
+
+```bash
+cd ~/robotics/go2_local_brain
+chmod +x scripts/install_jetson_service.sh
+./scripts/install_jetson_service.sh
+sudo systemctl start go2-local-brain
+sudo systemctl status go2-local-brain --no-pager
+```
+
+Manual install is also possible if you want to edit the service yourself:
 
 ```bash
 cd ~/robotics/go2_local_brain

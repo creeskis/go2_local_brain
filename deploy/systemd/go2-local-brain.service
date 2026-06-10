@@ -9,13 +9,6 @@ User=jetson
 Group=jetson
 WorkingDirectory=/home/jetson/robotics/go2_local_brain
 EnvironmentFile=-/home/jetson/robotics/go2_local_brain/.env
-Environment=GO2_GUI_HOST=0.0.0.0
-Environment=GO2_GUI_PORT=8775
-Environment=GO2_DETECTOR=yolo
-Environment=GO2_YOLO_MODEL=yolov8n.pt
-Environment=GO2_YOLO_DEVICE=0
-Environment=GO2_FACE_DETECTION=1
-Environment=GO2_FOLLOW_SOURCE=visual-or-sound
 ExecStart=/home/jetson/robotics/go2_local_brain/scripts/run_jetson_cockpit.sh
 Restart=on-failure
 RestartSec=5

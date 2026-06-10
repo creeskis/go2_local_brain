@@ -398,7 +398,7 @@ Then open this from the WSL instance:
 http://192.168.123.18:8775
 ```
 
-For a boot service, install `deploy/systemd/go2-local-brain.service` after editing the username/path if needed. The complete Jetson operating guide is in [docs/jetson_orin_deploy.md](docs/jetson_orin_deploy.md).
+For a boot service, run `scripts/install_jetson_service.sh` on the Jetson. It installs `deploy/systemd/go2-local-brain.service` with the current username and repo path. The complete Jetson operating guide is in [docs/jetson_orin_deploy.md](docs/jetson_orin_deploy.md).
 
 ## Python Concepts For Beginners
 
