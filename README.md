@@ -1522,6 +1522,31 @@ connect: ok
 
 Full details are in [docs/jetson_networking.md](docs/jetson_networking.md).
 
+### Dog Connects But Stays Lying Down
+
+After WebRTC recovery, the robot can connect while still being stuck in rest/damping posture. Use the one-shot posture recovery helper before opening a controller GUI:
+
+```bash
+GO2_AES_128_KEY= \
+GO2_IP=192.168.123.121 \
+GO2_WEBRTC_METHOD=LocalSTA \
+VERBOSE_WEBRTC_LOGS=1 \
+python -m go2_local_brain.recover_posture
+```
+
+That command requests `normal` motion mode, then sends `RecoveryStand`, `StandUp`, and `BalanceStand`.
+
+If the robot still refuses to stand, try the simpler sequence:
+
+```bash
+GO2_AES_128_KEY= \
+GO2_IP=192.168.123.121 \
+GO2_WEBRTC_METHOD=LocalSTA \
+python -m go2_local_brain.recover_posture --skip-recovery --settle-s 4
+```
+
+If both commands report success but the dog physically stays down, check the Unitree app/remote state, battery, motor lock/error state, and whether the dog is in an app-level rest mode that must be cleared from the controller.
+
 ### Ollama Fails
 
 Check Ollama:
