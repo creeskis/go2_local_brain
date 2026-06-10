@@ -154,6 +154,14 @@ Run the primary mapping cockpit with WASD/manual override, map builder, patrol, 
 python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --maps-dir maps
 ```
 
+Health and LiDAR diagnostics:
+
+```bash
+curl http://localhost:8775/api/health
+curl http://localhost:8775/api/lidar/debug
+curl -X POST http://localhost:8775/api/lidar/sample
+```
+
 Run AI-only autonomy with human detection and face boxes:
 
 ```bash

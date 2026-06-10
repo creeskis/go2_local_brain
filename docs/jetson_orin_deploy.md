@@ -102,6 +102,14 @@ chmod +x scripts/run_jetson_cockpit.sh
 
 The run script reads `.env` before starting Python, so the same file controls manual runs and systemd runs.
 
+Run the doctor script any time the setup feels wrong:
+
+```bash
+./scripts/jetson_doctor.sh
+```
+
+It checks Python imports, robot reachability, Ollama, the GUI health endpoint, LiDAR diagnostics, and systemd state.
+
 ## Systemd Service
 
 The service template assumes this path:
@@ -212,6 +220,31 @@ Run this from the WSL instance:
 curl http://192.168.123.18:8775/api/status
 ```
 
+Additional useful checks:
+
+```bash
+curl http://192.168.123.18:8775/api/health
+curl http://192.168.123.18:8775/api/lidar/debug
+curl -X POST http://192.168.123.18:8775/api/lidar/sample
+```
+
+If the LiDAR map is rotated or mirrored, use the GUI LiDAR controls or call:
+
+```bash
+curl -X POST http://192.168.123.18:8775/api/lidar/transform \
+  -H 'Content-Type: application/json' \
+  -d '{"rotate_deg":90,"flip_x":false,"flip_y":false,"swap_xy":false}'
+```
+
+Persist the working transform in `.env`:
+
+```env
+GO2_LIDAR_ROTATE_DEG=90
+GO2_LIDAR_FLIP_X=0
+GO2_LIDAR_FLIP_Y=0
+GO2_LIDAR_SWAP_XY=0
+```
+
 ## Practical Operating Flow
 
 1. Power the robot and confirm it is on the private network.
@@ -220,9 +253,11 @@ curl http://192.168.123.18:8775/api/status
 4. Use manual controls to verify motion.
 5. Verify live video.
 6. Verify YOLO person boxes if a person is visible.
-7. Drive or slow-patrol the room to collect LiDAR.
-8. Save the map.
-9. On future starts, load that map and set the localization lock before patrol.
+7. Check `/api/lidar/debug` and adjust the LiDAR transform until points match the map plane.
+8. Save a LiDAR sample if the transform is still wrong.
+9. Drive or slow-patrol the room to collect LiDAR.
+10. Save the map.
+11. On future starts, load that map and set the localization lock before patrol.
 
 ## When To Expose Ollama On The LAN
 

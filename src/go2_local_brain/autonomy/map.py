@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ class PatrolMap:
     waypoints: dict[str, Waypoint]
     patrol_route: list[str]
     no_go_zones: list[str]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def next_waypoint(self, index: int) -> tuple[int, Waypoint]:
         if not self.patrol_route:
@@ -60,6 +62,7 @@ class PatrolMap:
             },
             "patrol_route": list(self.patrol_route),
             "no_go_zones": list(self.no_go_zones),
+            "metadata": dict(self.metadata),
         }
 
 
@@ -95,18 +98,22 @@ def patrol_map_from_dict(raw: dict[str, Any], *, default_name: str = "untitled")
     zones = raw.get("no_go_zones", [])
     if not isinstance(zones, list):
         raise ValueError("no_go_zones must be a list")
+    metadata = raw.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("metadata must be an object")
 
     return PatrolMap(
         name=str(raw.get("name", default_name)),
         waypoints=waypoints,
         patrol_route=patrol_route,
         no_go_zones=[str(zone) for zone in zones],
+        metadata=dict(metadata),
     )
 
 
 def empty_patrol_map(name: str = "untitled") -> PatrolMap:
     """Create a blank map draft that is not ready for autonomy yet."""
-    return PatrolMap(name=name, waypoints={}, patrol_route=[], no_go_zones=[])
+    return PatrolMap(name=name, waypoints={}, patrol_route=[], no_go_zones=[], metadata=_default_metadata())
 
 
 def save_patrol_map(patrol_map: PatrolMap, maps_dir: str | Path) -> Path:
@@ -115,7 +122,14 @@ def save_patrol_map(patrol_map: PatrolMap, maps_dir: str | Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     filename = f"{safe_map_filename(patrol_map.name)}.json"
     path = root / filename
-    path.write_text(json.dumps(patrol_map.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    payload = patrol_map.to_dict()
+    metadata = dict(payload.get("metadata", {}))
+    metadata.setdefault("created_ts", time.time())
+    metadata["saved_ts"] = time.time()
+    metadata.setdefault("coordinate_frame", "local_odometry_m")
+    metadata.setdefault("localization_required", True)
+    payload["metadata"] = metadata
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
 
 
@@ -174,3 +188,11 @@ def _map_ready(patrol_map: PatrolMap) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _default_metadata() -> dict[str, Any]:
+    return {
+        "coordinate_frame": "local_odometry_m",
+        "localization_required": True,
+        "schema_note": "Map coordinates are local meters and need startup localization before patrol.",
+    }

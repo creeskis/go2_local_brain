@@ -14,7 +14,13 @@ from typing import Any
 from aiohttp import web
 
 from .autonomy.follow import FollowCommand, HumanFollowController, LocalSoundLevelProvider, SoundCue
-from .autonomy.lidar_map import LidarLocalMapper, LidarObstacleField, points_from_lidar_payload
+from .autonomy.lidar_map import (
+    LidarLocalMapper,
+    LidarObstacleField,
+    LidarTransform,
+    lidar_debug_payload,
+    points_from_lidar_payload,
+)
 from .autonomy.local_map import LocalMapState, Pose2D
 from .autonomy.map import (
     PatrolMap,
@@ -64,6 +70,7 @@ class AiAutonomyGui:
         yolo_device: str,
         face_detection: bool,
         follow_source: str,
+        lidar_transform: LidarTransform | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -76,6 +83,7 @@ class AiAutonomyGui:
         self._yolo_device = yolo_device or None
         self._face_detection = face_detection
         self._follow_source = follow_source
+        self._lidar_transform = lidar_transform or LidarTransform()
         self._client: Go2WebRTCClient | None = None
         self._supervisor: AutonomySupervisor | None = None
         self._patrol_map: PatrolMap | None = None
@@ -105,6 +113,7 @@ class AiAutonomyGui:
         self._lidar_last_error = ""
         self._status = "starting"
         self._last_result = ""
+        self._startup_ts = time.time()
 
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -125,8 +134,12 @@ class AiAutonomyGui:
         app.router.add_get("/", self._index)
         app.router.add_get("/video.mjpg", self._video_stream)
         app.router.add_get("/status.json", self._status_json)
+        app.router.add_get("/api/health", self._health_json)
         app.router.add_get("/detections.json", self._detections_json)
         app.router.add_get("/lidar.json", self._lidar_json)
+        app.router.add_get("/api/lidar/debug", self._lidar_debug_json)
+        app.router.add_post("/api/lidar/sample", self._lidar_sample_save)
+        app.router.add_post("/api/lidar/transform", self._lidar_transform_update)
         app.router.add_get("/api/maps", self._maps_list)
         app.router.add_post("/api/maps/save", self._map_save)
         app.router.add_post("/api/maps/load", self._map_load)
@@ -234,15 +247,17 @@ class AiAutonomyGui:
         if self._loop is not None:
             self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._set_lidar(payload)))
 
-    async def _set_lidar(self, payload: dict[str, Any]) -> None:
+    async def _set_lidar(self, payload: dict[str, Any], *, record_pose: bool = True) -> None:
         self._latest_lidar = payload
         self._latest_lidar_ts = time.time()
-        self._lidar_messages += 1
-        robot_points = points_from_lidar_payload(payload)
+        if record_pose:
+            self._lidar_messages += 1
+        robot_points = self._lidar_transform.apply(points_from_lidar_payload(payload))
         summary = self._lidar_obstacles.update(robot_points)
         if self._local_map.valid:
             self._lidar_mapper.add_scan(self._local_map.pose, robot_points)
-        self._run_recorder.add_pose(self._local_map.pose if self._local_map.valid else None, lidar_front_m=summary.front_m)
+        if record_pose:
+            self._run_recorder.add_pose(self._local_map.pose if self._local_map.valid else None, lidar_front_m=summary.front_m)
         async with self._state_changed:
             self._state_changed.notify_all()
 
@@ -262,11 +277,49 @@ class AiAutonomyGui:
     async def _status_json(self, _request: web.Request) -> web.Response:
         return web.json_response(self._status_payload())
 
+    async def _health_json(self, _request: web.Request) -> web.Response:
+        return web.json_response(self._health_payload())
+
     async def _detections_json(self, _request: web.Request) -> web.Response:
         return web.json_response(self._latest_observation.to_dict())
 
     async def _lidar_json(self, _request: web.Request) -> web.Response:
         return web.json_response(self._lidar_payload())
+
+    async def _lidar_debug_json(self, _request: web.Request) -> web.Response:
+        return web.json_response(self._lidar_debug_payload())
+
+    async def _lidar_sample_save(self, _request: web.Request) -> web.Response:
+        if self._latest_lidar is None:
+            return web.json_response({"ok": False, "result": "no parsed lidar payload has arrived yet"}, status=404)
+        root = self._maps_dir / "lidar_samples"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"lidar-sample-{int(time.time())}.json"
+        payload = {
+            "schema_version": 1,
+            "saved_ts": time.time(),
+            "debug": self._lidar_debug_payload(),
+            "latest_lidar": self._latest_lidar,
+        }
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        self._last_result = f"saved lidar sample {path.name}"
+        return web.json_response({"ok": True, "result": self._last_result, "path": str(path), "debug": payload["debug"]})
+
+    async def _lidar_transform_update(self, request: web.Request) -> web.Response:
+        payload = await _json_or_empty(request)
+        try:
+            self._lidar_transform = LidarTransform.from_values(
+                rotate_deg=payload.get("rotate_deg", self._lidar_transform.rotate_deg),
+                flip_x=payload.get("flip_x", self._lidar_transform.flip_x),
+                flip_y=payload.get("flip_y", self._lidar_transform.flip_y),
+                swap_xy=payload.get("swap_xy", self._lidar_transform.swap_xy),
+            )
+        except (TypeError, ValueError) as exc:
+            return web.json_response({"ok": False, "result": f"bad lidar transform: {exc}"}, status=400)
+        if self._latest_lidar is not None:
+            await self._set_lidar(self._latest_lidar, record_pose=False)
+        self._last_result = f"updated lidar transform {self._lidar_transform.to_dict()}"
+        return web.json_response({"ok": True, "result": self._last_result, "debug": self._lidar_debug_payload()})
 
     async def _maps_list(self, _request: web.Request) -> web.Response:
         return web.json_response({"maps": list_patrol_maps(self._maps_dir)})
@@ -508,6 +561,7 @@ class AiAutonomyGui:
                 "source": self._follow_source,
                 "last_action": self._follow_last_action,
                 "last_target": self._follow.last_target if self._follow is not None else "none",
+                "last_command": self._follow.last_command.__dict__ if self._follow is not None else None,
                 "sound_level": self._latest_sound_cue.level if self._latest_sound_cue is not None else None,
                 "sound_age_s": time.time() - self._latest_sound_cue.timestamp if self._latest_sound_cue is not None else None,
                 "sound_error": self._sound_provider.last_error,
@@ -516,10 +570,59 @@ class AiAutonomyGui:
             "detector": self._detector,
             "last_result": self._last_result,
             "autonomy": autonomy,
+            "health": self._health_payload(),
+        }
+
+    def _health_payload(self) -> dict[str, Any]:
+        now = time.time()
+        video_age = now - self._latest_video_ts if self._latest_video_ts else None
+        lidar_age = now - self._latest_lidar_ts if self._latest_lidar_ts else None
+        observation_age = now - self._latest_observation.timestamp if self._latest_observation.timestamp else None
+        robot_ok = self._status == "connected" and self._client is not None
+        video_ok = video_age is not None and video_age <= 2.0
+        lidar_error_rate_ok = self._lidar_raw_messages == 0 or self._lidar_parse_errors <= max(10, self._lidar_raw_messages * 0.50)
+        lidar_ok = lidar_age is not None and lidar_age <= 2.0 and lidar_error_rate_ok
+        map_ok = self._patrol_map is not None and self._local_map.valid
+        components = {
+            "robot": {"ok": robot_ok, "detail": self._status},
+            "video": {"ok": video_ok, "age_s": _round_optional(video_age), "frames": self._video_frames},
+            "lidar": {
+                "ok": lidar_ok,
+                "age_s": _round_optional(lidar_age),
+                "raw": self._lidar_raw_messages,
+                "parsed": self._lidar_messages,
+                "parse_errors": self._lidar_parse_errors,
+                "detail": self._lidar_last_error,
+            },
+            "perception": {
+                "ok": self._perception_health.ready,
+                "backend": self._perception_health.backend,
+                "detail": self._perception_health.detail,
+                "observation_age_s": _round_optional(observation_age),
+            },
+            "ollama": {
+                "ok": self._client is not None,
+                "detail": "checked when an AI command is executed",
+            },
+            "map": {
+                "ok": map_ok,
+                "loaded": self._patrol_map is not None,
+                "localized": self._local_map.valid,
+                "path": str(self._map_path) if self._map_path is not None else None,
+            },
+        }
+        degraded = [name for name, component in components.items() if not component["ok"]]
+        return {
+            "ok": bool(robot_ok and video_ok),
+            "degraded": degraded,
+            "uptime_s": round(now - self._startup_ts, 1),
+            "components": components,
         }
 
     def _lidar_payload(self) -> dict[str, Any]:
         latest = self._latest_lidar or {}
+        raw_points = points_from_lidar_payload(latest)
+        transformed_points = self._lidar_transform.apply(raw_points)
         return {
             "raw_messages": self._lidar_raw_messages,
             "messages": self._lidar_messages,
@@ -529,9 +632,24 @@ class AiAutonomyGui:
             "point_count": latest.get("point_count", 0),
             "source_point_count": latest.get("source_point_count", 0),
             "bounds": latest.get("bounds"),
-            "sample_points": (latest.get("robot_points") or [])[:8],
+            "transform": self._lidar_transform.to_dict(),
+            "sample_points": transformed_points[:8],
             "obstacles": self._lidar_obstacles.current_summary().to_dict(),
         }
+
+    def _lidar_debug_payload(self) -> dict[str, Any]:
+        payload = lidar_debug_payload(
+            raw_messages=self._lidar_raw_messages,
+            parsed_messages=self._lidar_messages,
+            parse_errors=self._lidar_parse_errors,
+            latest_payload=self._latest_lidar,
+            latest_ts=self._latest_lidar_ts,
+            transform=self._lidar_transform,
+        )
+        payload["last_error"] = self._lidar_last_error
+        payload["occupancy"] = self._lidar_mapper.to_dict(max_cells=60)
+        payload["obstacles"] = self._lidar_obstacles.current_summary().to_dict()
+        return payload
 
     def _map_pose_from_payload(self, payload: dict[str, Any]) -> Pose2D:
         waypoint_name = str(payload.get("waypoint", "")).strip()
@@ -711,6 +829,7 @@ def _patrol_map_from_payload(payload: dict[str, Any], *, require_route: bool = T
             waypoints=waypoints,
             patrol_route=_string_list(payload.get("patrol_route", [])),
             no_go_zones=_string_list(payload.get("no_go_zones", [])),
+            metadata=payload.get("metadata", {}) if isinstance(payload.get("metadata", {}), dict) else {},
         )
     if require_route:
         patrol_map.validate_for_patrol()
@@ -723,6 +842,10 @@ def _string_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _round_optional(value: float | None) -> float | None:
+    return round(value, 3) if value is not None else None
 
 
 _INDEX_HTML = """<!doctype html>
@@ -839,6 +962,14 @@ _INDEX_HTML = """<!doctype html>
         <button onclick="runAction('average')">Average Runs</button>
         <button onclick="runAction('save')">Save Runs</button>
       </div>
+      <label>LiDAR rotate deg <input id="lidarRotate" type="number" step="1" value="0"></label>
+      <div class="grid4">
+        <button onclick="setLidarPreset(-90)">-90</button>
+        <button onclick="setLidarPreset(0)">0</button>
+        <button onclick="setLidarPreset(90)">+90</button>
+        <button onclick="saveLidarSample()">Sample</button>
+      </div>
+      <button onclick="applyLidarTransform()">Apply LiDAR Transform</button>
       <pre id="lidarStatus">waiting</pre>
 
       <h2>Autonomy</h2>
@@ -1048,6 +1179,25 @@ _INDEX_HTML = """<!doctype html>
       if (!res.ok) alert(data.result || `${action} failed`);
       return data;
     }
+    function setLidarPreset(deg) {
+      document.getElementById("lidarRotate").value = deg;
+      applyLidarTransform();
+    }
+    async function applyLidarTransform() {
+      const body = {rotate_deg: Number(document.getElementById("lidarRotate").value || 0)};
+      const res = await fetch("/api/lidar/transform", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+      const data = await res.json().catch(() => ({result:"bad response"}));
+      await refresh();
+      if (!res.ok) alert(data.result || "LiDAR transform failed");
+      return data;
+    }
+    async function saveLidarSample() {
+      const res = await fetch("/api/lidar/sample", {method:"POST"});
+      const data = await res.json().catch(() => ({result:"bad response"}));
+      await refresh();
+      alert(data.result || "sample request complete");
+      return data;
+    }
     function speed() { return Number(document.getElementById("speed").value); }
     function turn() { return Number(document.getElementById("turn").value); }
     function moveVector() {
@@ -1149,8 +1299,10 @@ _INDEX_HTML = """<!doctype html>
       const a = data.autonomy || {};
       const f = data.follow || {};
       const tracker = data.tracker || {};
-      document.getElementById("top").textContent = `${data.status} video=${data.video_frames} state=${a.state || "none"}`;
+      const health = data.health || {};
+      document.getElementById("top").textContent = `${data.status} health=${health.ok ? "ok" : "degraded"} video=${data.video_frames} state=${a.state || "none"}`;
       document.getElementById("status").textContent = [
+        `health: ${health.ok} degraded=${(health.degraded || []).join(", ") || "none"}`,
         `state: ${a.state}`,
         `active: ${a.active}`,
         `map: ${a.map_name}`,
@@ -1167,6 +1319,7 @@ _INDEX_HTML = """<!doctype html>
       document.getElementById("lidarStatus").textContent = [
         `raw=${lidar.raw_messages ?? 0} parsed=${lidar.messages ?? 0} errors=${lidar.parse_errors ?? 0}`,
         `points=${lidar.point_count ?? 0}/${lidar.source_point_count ?? 0} age=${lidar.age_s?.toFixed?.(2) ?? "none"}s`,
+        `transform=${JSON.stringify(lidar.transform || {})}`,
         `front=${obs.front_m ?? "none"} left=${obs.left_m ?? "none"} right=${obs.right_m ?? "none"} rear=${obs.rear_m ?? "none"}`,
         `front_blocked=${obs.blocked_front} fresh=${obs.fresh}`,
         `occupancy_cells=${data.occupancy_map?.cell_count ?? 0}`,
@@ -1240,6 +1393,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--yolo-threshold", type=float, default=0.55)
     parser.add_argument("--yolo-device", default="", help="Optional Ultralytics device, for example cuda:0 or cpu")
     parser.add_argument("--face-detection", action="store_true", help="Also try optional OpenCV Haar face boxes")
+    parser.add_argument("--lidar-rotate-deg", type=float, default=0.0, help="Rotate LiDAR points before mapping")
+    parser.add_argument("--lidar-flip-x", action="store_true", help="Flip LiDAR X before mapping")
+    parser.add_argument("--lidar-flip-y", action="store_true", help="Flip LiDAR Y before mapping")
+    parser.add_argument("--lidar-swap-xy", action="store_true", help="Swap LiDAR X/Y before mapping")
     parser.add_argument(
         "--follow-source",
         choices=["visual", "sound", "visual-or-sound"],
@@ -1270,6 +1427,12 @@ async def _amain() -> None:
         args.yolo_device,
         args.face_detection,
         args.follow_source,
+        LidarTransform(
+            rotate_deg=args.lidar_rotate_deg,
+            flip_x=args.lidar_flip_x,
+            flip_y=args.lidar_flip_y,
+            swap_xy=args.lidar_swap_xy,
+        ),
     ).run()
 
 

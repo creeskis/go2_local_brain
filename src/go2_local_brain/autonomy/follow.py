@@ -64,6 +64,9 @@ class HumanFollowController:
         self._duration_s = duration_s
         self._last_action = "none"
         self._last_target = "none"
+        self._last_command = FollowCommand(0.0, 0.0, 0.0, "none")
+        self._smoothed_center_error: float | None = None
+        self._smoothed_height: float | None = None
 
     @property
     def last_action(self) -> str:
@@ -73,51 +76,64 @@ class HumanFollowController:
     def last_target(self) -> str:
         return self._last_target
 
+    @property
+    def last_command(self) -> FollowCommand:
+        return self._last_command
+
     async def step(self, observation: Observation, sound_cue: SoundCue | None = None) -> FollowCommand:
         command = self.plan(observation, sound_cue)
         await self._mover.move(command.vx, 0.0, command.vyaw, command.duration_s)
         self._last_action = command.reason
+        self._last_command = command
         return command
 
     def plan(self, observation: Observation, sound_cue: SoundCue | None = None) -> FollowCommand:
-            target = best_human_detection(observation)
-            if target is None:
-                if sound_cue is not None and time.time() - sound_cue.timestamp < 2.0:
-                    turn = 0.25 if sound_cue.direction is None else _clamp(sound_cue.direction, -self._max_turn, self._max_turn)
-                    self._last_target = "sound"
-                    return FollowCommand(0.0, turn, self._duration_s, "scan toward sound")
-                self._last_target = "none"
-                return FollowCommand(0.0, 0.25, self._duration_s, "scan for person")
-    
-            center_x = _relative_center(target.x, observation.frame_width)
-            height = _relative_size(target.height, observation.frame_height)
-            if center_x is None:
-                center_error = 0.0
-            else:
-                center_error = center_x - 0.5
-    
-            # FIX: Added a negative sign to center_error (-center_error).
-            # This ensures a human on the right (positive error) results in a negative turn (turn right).
-            turn = 0.0 if abs(center_error) < self._deadband else _clamp(-center_error * 1.4, -self._max_turn, self._max_turn)
-            
-            if height is None:
+        target = best_human_detection(observation)
+        if target is None:
+            self._smoothed_center_error = None
+            self._smoothed_height = None
+            if sound_cue is not None and time.time() - sound_cue.timestamp < 2.0:
+                turn = 0.25 if sound_cue.direction is None else _clamp(sound_cue.direction, -self._max_turn, self._max_turn)
+                self._last_target = "sound"
+                command = FollowCommand(0.0, turn, self._duration_s, "scan toward sound")
+                self._last_command = command
+                return command
+            self._last_target = "none"
+            command = FollowCommand(0.0, 0.25, self._duration_s, "scan for person")
+            self._last_command = command
+            return command
+
+        center_x = _relative_center(target.x, observation.frame_width)
+        height = _relative_size(target.height, observation.frame_height)
+        raw_center_error = 0.0 if center_x is None else center_x - 0.5
+        center_error = _smooth(self._smoothed_center_error, raw_center_error, alpha=0.45)
+        self._smoothed_center_error = center_error
+
+        # Human on right means positive image error; Unitree yaw-right is negative here.
+        turn = 0.0 if abs(center_error) < self._deadband else _clamp(-center_error * 1.4, -self._max_turn, self._max_turn)
+
+        if height is None:
+            forward = 0.0
+        else:
+            smoothed_height = _smooth(self._smoothed_height, height, alpha=0.45)
+            self._smoothed_height = smoothed_height
+            distance_error = self._target_height - smoothed_height
+            forward = _clamp(distance_error * 2.2, -0.40, self._max_forward)
+            if abs(distance_error) < 0.04:
                 forward = 0.0
-            else:
-                distance_error = self._target_height - height
-                forward = _clamp(distance_error * 2.2, -0.40, self._max_forward)
-                if abs(distance_error) < 0.04:
-                    forward = 0.0
-    
-            self._last_target = f"person:{target.confidence:.2f}"
-            if forward == 0.0 and turn == 0.0:
-                reason = "hold person centered"
-            elif forward > 0.0:
-                reason = "follow person forward"
-            elif forward < 0.0:
-                reason = "back away from person"
-            else:
-                reason = "turn toward person"
-            return FollowCommand(forward, turn, self._duration_s, reason)
+
+        self._last_target = f"person:{target.confidence:.2f}"
+        if forward == 0.0 and turn == 0.0:
+            reason = "hold person centered"
+        elif forward > 0.0:
+            reason = "follow person forward"
+        elif forward < 0.0:
+            reason = "back away from person"
+        else:
+            reason = "turn toward person"
+        command = FollowCommand(forward, turn, self._duration_s, reason)
+        self._last_command = command
+        return command
 
 
 class LocalSoundLevelProvider:
@@ -176,3 +192,9 @@ def _relative_size(value: float | None, extent: int | None) -> float | None:
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def _smooth(previous: float | None, current: float, *, alpha: float) -> float:
+    if previous is None:
+        return current
+    return previous * (1.0 - alpha) + current * alpha

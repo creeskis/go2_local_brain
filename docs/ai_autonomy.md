@@ -47,6 +47,31 @@ For a camera-only dry run that bypasses detector readiness:
 python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --maps-dir maps --allow-no-detector
 ```
 
+## Health And LiDAR Diagnostics
+
+The cockpit exposes readiness and LiDAR debug endpoints:
+
+```bash
+curl http://localhost:8775/api/health
+curl http://localhost:8775/api/lidar/debug
+```
+
+If the map is rotated or mirrored, adjust the transform live:
+
+```bash
+curl -X POST http://localhost:8775/api/lidar/transform \
+  -H 'Content-Type: application/json' \
+  -d '{"rotate_deg":90,"flip_x":false,"flip_y":false,"swap_xy":false}'
+```
+
+Save a replayable LiDAR sample for offline debugging:
+
+```bash
+curl -X POST http://localhost:8775/api/lidar/sample
+```
+
+Samples are written under `maps/lidar_samples/`.
+
 Open:
 
 ```text

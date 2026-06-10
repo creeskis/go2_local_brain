@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 from go2_local_brain.autonomy.follow import HumanFollowController, SoundCue
-from go2_local_brain.autonomy.lidar_map import LidarLocalMapper, LidarObstacleField
+from go2_local_brain.autonomy.lidar_map import LidarLocalMapper, LidarObstacleField, LidarTransform, lidar_debug_payload
 from go2_local_brain.autonomy.local_map import LocalMapState, Pose2D, normalize_radians, raw_pose_from_sport_state
 from go2_local_brain.autonomy.map import PatrolMap, Waypoint, list_patrol_maps, load_patrol_map, save_patrol_map
 from go2_local_brain.autonomy.navigator import AutonomyNavigator
@@ -130,6 +130,13 @@ class PatrolMapTests(unittest.TestCase):
         self.assertEqual(maps[0]["name"], "draft")
         self.assertFalse(maps[0]["ready"])
 
+    def test_saved_map_includes_localization_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = save_patrol_map(_map(), td)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(raw["metadata"]["coordinate_frame"], "local_odometry_m")
+        self.assertTrue(raw["metadata"]["localization_required"])
+
 
 class LocalMapStateTests(unittest.TestCase):
     def test_raw_pose_from_sport_state_extracts_position_and_yaw(self) -> None:
@@ -196,6 +203,32 @@ class LidarMapTests(unittest.TestCase):
         cells = {(cell["x"], cell["y"]) for cell in payload["cells"]}  # type: ignore[index]
         self.assertIn((2.0, 2.0), cells)
         self.assertIn((1.0, 3.0), cells)
+
+    def test_lidar_transform_rotates_and_flips_points(self) -> None:
+        transform = LidarTransform(rotate_deg=90.0, flip_x=True)
+        point = transform.apply([[1.0, 0.0, 0.0]])[0]
+        self.assertAlmostEqual(point[0], 0.0, places=3)
+        self.assertAlmostEqual(point[1], -1.0, places=3)
+
+    def test_lidar_debug_payload_reports_parse_rate_and_bounds(self) -> None:
+        payload = {
+            "robot_points": [[1.0, 0.0, 0.0], [0.0, 2.0, 0.5]],
+            "source_point_count": 2,
+            "bounds": {"min_x": 0.0},
+        }
+        debug = lidar_debug_payload(
+            raw_messages=10,
+            parsed_messages=7,
+            parse_errors=3,
+            latest_payload=payload,
+            latest_ts=8.0,
+            transform=LidarTransform(rotate_deg=90.0),
+            now=10.0,
+        )
+        self.assertEqual(debug["parse_error_rate"], 0.3)
+        self.assertEqual(debug["point_count"], 2)
+        self.assertEqual(debug["age_s"], 2.0)
+        self.assertIsNotNone(debug["transformed_bounds"])
 
     def test_run_recorder_averages_repeated_paths(self) -> None:
         recorder = PathRunRecorder(min_step_m=0.0, min_period_s=0.0)
@@ -330,6 +363,28 @@ class FollowControllerTests(unittest.TestCase):
         self.assertLess(command.vyaw, 0.0)
         self.assertGreater(command.vx, 0.0)
         self.assertIn("person", controller.last_target)
+        self.assertEqual(controller.last_command.reason, command.reason)
+
+    def test_follow_smooths_rapid_target_shift(self) -> None:
+        client = FakeClient()
+        controller = HumanFollowController(client)
+        first = Observation(
+            timestamp=1.0,
+            frame_available=True,
+            frame_width=640,
+            frame_height=480,
+            detections=[Detection("person", 0.9, x=480, y=240, width=90, height=120)],
+        )
+        second = Observation(
+            timestamp=2.0,
+            frame_available=True,
+            frame_width=640,
+            frame_height=480,
+            detections=[Detection("person", 0.9, x=160, y=240, width=90, height=120)],
+        )
+        controller.plan(first)
+        command = controller.plan(second)
+        self.assertLess(abs(command.vyaw), 0.55)
 
     def test_follow_backs_away_from_close_person(self) -> None:
         client = FakeClient()

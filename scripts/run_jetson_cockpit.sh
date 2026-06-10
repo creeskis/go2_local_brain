@@ -25,6 +25,7 @@ YOLO_MODEL="${GO2_YOLO_MODEL:-yolov8n.pt}"
 YOLO_THRESHOLD="${GO2_YOLO_THRESHOLD:-0.55}"
 YOLO_DEVICE="${GO2_YOLO_DEVICE:-0}"
 FOLLOW_SOURCE="${GO2_FOLLOW_SOURCE:-visual-or-sound}"
+LIDAR_ROTATE_DEG="${GO2_LIDAR_ROTATE_DEG:-0}"
 
 ARGS=(
   --host "$HOST"
@@ -34,6 +35,7 @@ ARGS=(
   --yolo-model "$YOLO_MODEL"
   --yolo-threshold "$YOLO_THRESHOLD"
   --follow-source "$FOLLOW_SOURCE"
+  --lidar-rotate-deg "$LIDAR_ROTATE_DEG"
 )
 
 if [[ -n "$START_MAP" ]]; then
@@ -50,6 +52,18 @@ fi
 
 if [[ "${GO2_ALLOW_NO_DETECTOR:-0}" == "1" ]]; then
   ARGS+=(--allow-no-detector)
+fi
+
+if [[ "${GO2_LIDAR_FLIP_X:-0}" == "1" ]]; then
+  ARGS+=(--lidar-flip-x)
+fi
+
+if [[ "${GO2_LIDAR_FLIP_Y:-0}" == "1" ]]; then
+  ARGS+=(--lidar-flip-y)
+fi
+
+if [[ "${GO2_LIDAR_SWAP_XY:-0}" == "1" ]]; then
+  ARGS+=(--lidar-swap-xy)
 fi
 
 exec python -m go2_local_brain.ai_autonomy_gui "${ARGS[@]}"
