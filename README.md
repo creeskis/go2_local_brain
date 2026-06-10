@@ -1487,6 +1487,41 @@ Then:
 python -m go2_local_brain.main
 ```
 
+### WebRTC Works, Then Breaks After Dog Reboot
+
+If `/con_notify` responds but the SDK fails with `NoSdpAnswerError`, the dog may have rebooted into a bad LocalSTA state. The confirmed failure mode is:
+
+- dog clock wrong enough to make DDS reject timestamps,
+- `ip_forward=1`,
+- reboot-restored `eth0` route overlap on `192.168.123.112`,
+- `unitreeWebRTCClientMaster` bound to Ethernet instead of Wi-Fi.
+
+From the WSL instance:
+
+```bash
+cd ~/robotics/go2_local_brain
+./scripts/recover_dog_webrtc_wifi_over_ssh.sh
+```
+
+Then test:
+
+```bash
+GO2_AES_128_KEY= \
+GO2_IP=192.168.123.121 \
+GO2_WEBRTC_METHOD=LocalSTA \
+VERBOSE_WEBRTC_LOGS=1 \
+python -m go2_local_brain.diagnose_webrtc
+```
+
+Success looks like:
+
+```text
+Data Channel Verification: OK
+connect: ok
+```
+
+Full details are in [docs/jetson_networking.md](docs/jetson_networking.md).
+
 ### Ollama Fails
 
 Check Ollama:

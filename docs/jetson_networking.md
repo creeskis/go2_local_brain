@@ -215,3 +215,61 @@ python -m go2_local_brain.main
 7. Once WSL works again, test Jetson with `GO2_IP=192.168.123.121` and `GO2_WEBRTC_METHOD=LocalSTA`.
 
 The key idea: fix WebRTC first, then expose the Jetson cockpit. Do not keep changing dog routes while debugging the SDP answer.
+
+## Confirmed Dog Reboot Failure Mode
+
+After a robot reboot, this firmware can restore a bad LocalSTA state:
+
+```text
+eth0 secondary address: 192.168.123.112/24
+ip_forward: 1
+default route via wlan0 and eth0
+192.168.123.0/24 route via wlan0 and eth0
+unitreeWebRTCClientMaster UDP bound to 192.168.123.161
+```
+
+In that state, `curl http://192.168.123.121:9991/con_notify` can still work, but the SDK may fail immediately after posting the SDP offer:
+
+```text
+NoSdpAnswerError: Robot signaling returned no SDP answer
+RemoteDisconnected('Remote end closed connection without response')
+```
+
+One confirmed cause was the dog clock booting into the wrong year. The robot-side `/tmp/unitree_xfxton.log` showed:
+
+```text
+terminate called after throwing an instance of 'dds::core::Error'
+what(): dds::core::Time::sec out of bounds
+```
+
+The recovery is:
+
+1. Sync the dog date to the real UTC time.
+2. Disable IPv4 forwarding.
+3. Remove the reboot-restored eth0 `192.168.123.112` route overlap.
+4. Bring eth0 down for the Wi-Fi test.
+5. Restart `unitreeWebRTCClientMaster` and `xfkTon`.
+6. Verify the WebRTC UDP socket binds to `192.168.123.121` or `0.0.0.0`, not `192.168.123.161`.
+
+From the WSL instance, run:
+
+```bash
+cd ~/robotics/go2_local_brain
+./scripts/recover_dog_webrtc_wifi_over_ssh.sh
+```
+
+Then test:
+
+```bash
+GO2_AES_128_KEY= \
+GO2_IP=192.168.123.121 \
+GO2_WEBRTC_METHOD=LocalSTA \
+VERBOSE_WEBRTC_LOGS=1 \
+python -m go2_local_brain.diagnose_webrtc
+```
+
+If you are already SSHed into the dog, copy or paste `scripts/recover_dog_webrtc_wifi.sh` onto the dog and run it as root. You can also set the date explicitly:
+
+```bash
+DOG_UTC_DATE="$(date -u '+%Y-%m-%d %H:%M:%S')" ./scripts/recover_dog_webrtc_wifi.sh
+```
