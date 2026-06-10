@@ -1496,18 +1496,20 @@ If `/con_notify` responds but the SDK fails with `NoSdpAnswerError`, the dog may
 - reboot-restored `eth0` route overlap on `192.168.123.112`,
 - `unitreeWebRTCClientMaster` bound to Ethernet instead of Wi-Fi.
 
-From the WSL instance:
+From the WSL instance, sync the dog clock and print WebRTC binding diagnostics:
 
 ```bash
 cd ~/robotics/go2_local_brain
 ./scripts/recover_dog_webrtc_wifi_over_ssh.sh
 ```
 
+That command is non-destructive by default. It does not restart robot services. If the diagnostics show the robot WebRTC bridge is bound to Ethernet, use `GO2_IP=192.168.123.161` instead of forcing the dog into Wi-Fi-only mode.
+
 Then test:
 
 ```bash
 GO2_AES_128_KEY= \
-GO2_IP=192.168.123.121 \
+GO2_IP=192.168.123.161 \
 GO2_WEBRTC_METHOD=LocalSTA \
 VERBOSE_WEBRTC_LOGS=1 \
 python -m go2_local_brain.diagnose_webrtc
@@ -1528,7 +1530,7 @@ After WebRTC recovery, the robot can connect while still being stuck in rest/dam
 
 ```bash
 GO2_AES_128_KEY= \
-GO2_IP=192.168.123.121 \
+GO2_IP=192.168.123.161 \
 GO2_WEBRTC_METHOD=LocalSTA \
 VERBOSE_WEBRTC_LOGS=1 \
 python -m go2_local_brain.recover_posture
@@ -1540,7 +1542,7 @@ If the robot still refuses to stand, try the simpler sequence:
 
 ```bash
 GO2_AES_128_KEY= \
-GO2_IP=192.168.123.121 \
+GO2_IP=192.168.123.161 \
 GO2_WEBRTC_METHOD=LocalSTA \
 python -m go2_local_brain.recover_posture --skip-recovery --settle-s 4
 ```
@@ -1551,7 +1553,7 @@ To see whether the robot accepts or rejects each movement request, run the motio
 
 ```bash
 GO2_AES_128_KEY= \
-GO2_IP=192.168.123.121 \
+GO2_IP=192.168.123.161 \
 GO2_WEBRTC_METHOD=LocalSTA \
 VERBOSE_WEBRTC_LOGS=1 \
 python -m go2_local_brain.diagnose_motion
@@ -1568,9 +1570,19 @@ Only run the tiny move test when the dog has room:
 
 ```bash
 GO2_AES_128_KEY= \
-GO2_IP=192.168.123.121 \
+GO2_IP=192.168.123.161 \
 GO2_WEBRTC_METHOD=LocalSTA \
 python -m go2_local_brain.diagnose_motion --move-test
+```
+
+If motion works on `.161` but video does not, isolate video with:
+
+```bash
+GO2_AES_128_KEY= \
+GO2_IP=192.168.123.161 \
+GO2_WEBRTC_METHOD=LocalSTA \
+VERBOSE_WEBRTC_LOGS=1 \
+python -m go2_local_brain.diagnose_video --seconds 10
 ```
 
 ### Ollama Fails

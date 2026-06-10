@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run this from the WSL instance. It copies the dog-side recovery script,
-# syncs the dog clock from this machine, and restarts the robot WebRTC bridge.
+# Run this from the WSL instance. It copies the dog-side recovery script and
+# syncs the dog clock from this machine. By default it does not restart robot
+# services. Set GO2_FORCE_WEBRTC_RESTART=1 only if signaling is wedged and you
+# accept the risk of disrupting the motion stack.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOG_HOST="${GO2_IP:-192.168.123.121}"
@@ -18,5 +20,5 @@ scp "${ROOT_DIR}/scripts/recover_dog_webrtc_wifi.sh" "${DOG_USER}@${DOG_HOST}:${
 ssh "${DOG_USER}@${DOG_HOST}" "chmod +x '${REMOTE_SCRIPT}' && DOG_UTC_DATE='${UTC_NOW}' DOG_WIFI_IP='${DOG_HOST}' '${REMOTE_SCRIPT}'"
 
 echo
-echo "Now test from WSL:"
+echo "Now test from WSL. If the dog WebRTC bridge is bound to eth0, use GO2_IP=192.168.123.161:"
 echo "  GO2_AES_128_KEY= GO2_IP=${DOG_HOST} GO2_WEBRTC_METHOD=LocalSTA VERBOSE_WEBRTC_LOGS=1 python -m go2_local_brain.diagnose_webrtc"

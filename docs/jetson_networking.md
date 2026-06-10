@@ -251,25 +251,33 @@ The recovery is:
 5. Restart `unitreeWebRTCClientMaster` and `xfkTon`.
 6. Verify the WebRTC UDP socket binds to `192.168.123.121` or `0.0.0.0`, not `192.168.123.161`.
 
-From the WSL instance, run:
+From the WSL instance, run the non-destructive clock/binding check:
 
 ```bash
 cd ~/robotics/go2_local_brain
 ./scripts/recover_dog_webrtc_wifi_over_ssh.sh
 ```
 
+Do not force-restart `xfkTon` or `unitreeWebRTCClientMaster` during normal startup. On this firmware that can restore video while leaving motion commands ignored. If the dog naturally binds WebRTC to `192.168.123.161`, use that as `GO2_IP`.
+
 Then test:
 
 ```bash
 GO2_AES_128_KEY= \
-GO2_IP=192.168.123.121 \
+GO2_IP=192.168.123.161 \
 GO2_WEBRTC_METHOD=LocalSTA \
 VERBOSE_WEBRTC_LOGS=1 \
 python -m go2_local_brain.diagnose_webrtc
 ```
 
-If you are already SSHed into the dog, copy or paste `scripts/recover_dog_webrtc_wifi.sh` onto the dog and run it as root. You can also set the date explicitly:
+If you are already SSHed into the dog, copy or paste `scripts/recover_dog_webrtc_wifi.sh` onto the dog and run it as root. By default it syncs/checks state only. You can also set the date explicitly:
 
 ```bash
 DOG_UTC_DATE="$(date -u '+%Y-%m-%d %H:%M:%S')" ./scripts/recover_dog_webrtc_wifi.sh
+```
+
+Only use the destructive WebRTC restart path when signaling is wedged and you accept the risk that the motion stack may need a full robot reboot:
+
+```bash
+GO2_FORCE_WEBRTC_RESTART=1 ./scripts/recover_dog_webrtc_wifi.sh
 ```
