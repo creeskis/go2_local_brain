@@ -16,6 +16,7 @@ If you only need to run it, start with the install guides and command cheat shee
 - [Quick Command Cheat Sheet](#quick-command-cheat-sheet)
 - [Installation Guide 1: WSL Instance](#installation-guide-1-wsl-instance)
 - [Installation Guide 2: Jetson Orin Nano](#installation-guide-2-jetson-orin-nano)
+- [Recommended Jetson Runtime Layout](#recommended-jetson-runtime-layout)
 - [Python Concepts For Beginners](#python-concepts-for-beginners)
 - [Project Architecture](#project-architecture)
 - [How A Text Prompt Becomes Robot Motion](#how-a-text-prompt-becomes-robot-motion)
@@ -55,6 +56,32 @@ GO2_IP=192.168.123.121
 ```
 
 `GO2_IP` points at the dog. It does not point at the Jetson.
+
+## Recommended Jetson Runtime Layout
+
+The preferred production layout is:
+
+```text
+Go2 Air <-> Jetson Orin Nano <-> browser on WSL instance
+```
+
+The Jetson should run:
+
+- the WebRTC robot connection,
+- live video frame decoding,
+- LiDAR parsing and map state,
+- YOLO/person detection,
+- follow and patrol loops,
+- Ollama with `qwen3:1.7b`,
+- the port `8775` browser cockpit.
+
+The WSL instance should only open:
+
+```text
+http://192.168.123.18:8775
+```
+
+The Jetson does not need a separate video upload service. The app receives WebRTC video from the robot, converts frames to JPEG, and serves the browser stream from `/video.mjpg`. See [docs/jetson_orin_deploy.md](docs/jetson_orin_deploy.md) for the full deployment guide, systemd service, and network checks.
 
 ## What This Project Does
 
@@ -328,7 +355,7 @@ pip install -e ".[vision,audio]"
 ### 4. Configure `.env`
 
 ```bash
-cp .env.example .env
+cp .env.jetson.example .env
 nano .env
 ```
 
@@ -362,8 +389,16 @@ ollama list
 source .venv/bin/activate
 python scripts/smoke_test_imports.py
 python -m unittest discover -s tests
-python -m go2_local_brain.main
+./scripts/run_jetson_cockpit.sh
 ```
+
+Then open this from the WSL instance:
+
+```text
+http://192.168.123.18:8775
+```
+
+For a boot service, install `deploy/systemd/go2-local-brain.service` after editing the username/path if needed. The complete Jetson operating guide is in [docs/jetson_orin_deploy.md](docs/jetson_orin_deploy.md).
 
 ## Python Concepts For Beginners
 
