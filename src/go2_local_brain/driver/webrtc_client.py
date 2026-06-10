@@ -305,6 +305,35 @@ class Go2WebRTCClient:
         await self._sport_request_first([(cmd_name, parameter)])
         self._touch()
 
+    async def sport_command_response(self, cmd_name: str, parameter: Optional[dict[str, Any]] = None) -> Any:
+        """Run an exact sport command and return the robot response for diagnostics."""
+        response = await self._sport_request_first([(cmd_name, parameter)])
+        self._touch()
+        return response
+
+    async def motion_mode_status(self) -> Any:
+        """Return the raw motion-switcher status response, if that topic is available."""
+        if self._pubsub is None or not self._motion_switcher_topic:
+            raise RuntimeError("motion switcher topic is not available")
+        return await asyncio.wait_for(
+            self._pubsub.publish_request_new(self._motion_switcher_topic, {"api_id": _MOTION_SWITCHER_CHECK_API}),
+            timeout=3.0,
+        )
+
+    async def set_motion_mode(self, target: str) -> Any:
+        """Set motion-switcher mode and return the raw response."""
+        if self._pubsub is None or not self._motion_switcher_topic:
+            raise RuntimeError("motion switcher topic is not available")
+        response = await asyncio.wait_for(
+            self._pubsub.publish_request_new(
+                self._motion_switcher_topic,
+                {"api_id": _MOTION_SWITCHER_SET_API, "parameter": {"name": target}},
+            ),
+            timeout=3.0,
+        )
+        await asyncio.sleep(_MOTION_MODE_SETTLE_S)
+        return response
+
     def available_sport_commands(self) -> list[str]:
         """Return exact sport command names available from the installed package."""
         return sorted(set(self._sport_cmd) | set(self._sport_cmd_mcf))
@@ -546,7 +575,7 @@ class Go2WebRTCClient:
         async with self._lock:
             await self._pubsub.publish_request_new(self._sport_topic, {"api_id": api_id})
 
-    async def _sport_request(self, cmd_name: str, parameter: Optional[dict[str, Any]] = None, *, mcf: bool = False) -> None:
+    async def _sport_request(self, cmd_name: str, parameter: Optional[dict[str, Any]] = None, *, mcf: bool = False) -> Any:
         table = self._sport_cmd_mcf if mcf else self._sport_cmd
         api_id = table.get(cmd_name)
         if api_id is None:
@@ -555,16 +584,14 @@ class Go2WebRTCClient:
         if parameter is not None:
             payload["parameter"] = parameter
         async with self._lock:
-            await self._pubsub.publish_request_new(self._sport_topic, payload)
+            return await self._pubsub.publish_request_new(self._sport_topic, payload)
 
-    async def _sport_request_first(self, candidates: list[tuple[str, Optional[dict[str, Any]]]]) -> None:
+    async def _sport_request_first(self, candidates: list[tuple[str, Optional[dict[str, Any]]]]) -> Any:
         for name, parameter in candidates:
             if name in self._sport_cmd_mcf:
-                await self._sport_request(name, parameter, mcf=True)
-                return
+                return await self._sport_request(name, parameter, mcf=True)
             if name in self._sport_cmd:
-                await self._sport_request(name, parameter)
-                return
+                return await self._sport_request(name, parameter)
         names = [name for name, _parameter in candidates]
         raise RuntimeError(f"none of {names} are in SPORT_CMD or SPORT_CMD_MCF")
 

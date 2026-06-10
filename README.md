@@ -1547,6 +1547,32 @@ python -m go2_local_brain.recover_posture --skip-recovery --settle-s 4
 
 If both commands report success but the dog physically stays down, check the Unitree app/remote state, battery, motor lock/error state, and whether the dog is in an app-level rest mode that must be cleared from the controller.
 
+To see whether the robot accepts or rejects each movement request, run the motion diagnostic:
+
+```bash
+GO2_AES_128_KEY= \
+GO2_IP=192.168.123.121 \
+GO2_WEBRTC_METHOD=LocalSTA \
+VERBOSE_WEBRTC_LOGS=1 \
+python -m go2_local_brain.diagnose_motion
+```
+
+It prints:
+
+- current motion-switcher status,
+- response from setting motion mode to `normal`,
+- responses from `RecoveryStand`, `StandUp`, and `BalanceStand`,
+- sport telemetry before and after.
+
+Only run the tiny move test when the dog has room:
+
+```bash
+GO2_AES_128_KEY= \
+GO2_IP=192.168.123.121 \
+GO2_WEBRTC_METHOD=LocalSTA \
+python -m go2_local_brain.diagnose_motion --move-test
+```
+
 ### Ollama Fails
 
 Check Ollama:
