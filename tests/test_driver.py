@@ -13,7 +13,10 @@ from go2_local_brain.driver.webrtc_client import (
     Go2Config,
     Go2WebRTCClient,
     _extract_motion_mode_name,
+    _friendly_connect_error,
+    _method_name,
     _merge_sport_cmds,
+    _resolve_webrtc_method,
 )
 from go2_local_brain.safety.limits import MAX_VX
 
@@ -224,6 +227,44 @@ class StopResilienceTests(unittest.TestCase):
         pubsub.publish_request_new = boom  # type: ignore[assignment]
         client = _make_client_with_fake(pubsub)
         asyncio.run(client.stop())
+
+
+class WebRTCConfigTests(unittest.TestCase):
+    class FakeMethod:
+        LocalSTA = object()
+        LocalAP = object()
+        Remote = object()
+
+    def test_resolve_webrtc_method_accepts_aliases(self) -> None:
+        self.assertIs(_resolve_webrtc_method(self.FakeMethod, "sta"), self.FakeMethod.LocalSTA)
+        self.assertIs(_resolve_webrtc_method(self.FakeMethod, "LocalAP"), self.FakeMethod.LocalAP)
+        self.assertIs(_resolve_webrtc_method(self.FakeMethod, "remote"), self.FakeMethod.Remote)
+
+    def test_connection_kwargs_local_ap_does_not_force_ip(self) -> None:
+        client = Go2WebRTCClient(Go2Config(ip="192.168.123.121", webrtc_method="LocalAP"))
+
+        class Method:
+            name = "LocalAP"
+
+        kwargs = client._connection_kwargs(Method())
+        self.assertNotIn("ip", kwargs)
+
+    def test_friendly_no_sdp_error_explains_network_recovery(self) -> None:
+        class NoSdpAnswerError(Exception):
+            pass
+
+        class Method:
+            name = "LocalSTA"
+
+        msg = _friendly_connect_error(NoSdpAnswerError("Robot signaling returned no SDP answer"), Go2Config(ip="192.168.123.121"), Method())
+        self.assertIn("returned no SDP answer", msg)
+        self.assertIn("GO2_WEBRTC_METHOD=LocalSTA", msg)
+
+    def test_method_name_handles_plain_object(self) -> None:
+        class Method:
+            name = "LocalSTA"
+
+        self.assertEqual(_method_name(Method()), "LocalSTA")
 
 
 class MotionModeNameExtractorTests(unittest.TestCase):

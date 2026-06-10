@@ -40,6 +40,7 @@ EXPLORATION_MAX_DURATION_S=15
 Notes:
 
 - `GO2_IP` is the robot IP, not the Jetson IP.
+- `GO2_WEBRTC_METHOD` defaults to `LocalSTA`; use `LocalAP` only for robot AP mode and `Remote` only for Unitree cloud/TURN mode.
 - Leave `GO2_AES_128_KEY` blank unless the firmware starts requiring it.
 - Leave `OLLAMA_HOST` blank when Ollama runs on the same machine as the Python process.
 - Set `OLLAMA_HOST=http://192.168.123.18:11434` if the Python process runs on a WSL instance and Ollama runs on the Jetson.
@@ -48,7 +49,7 @@ Notes:
 
 `Go2WebRTCClient.connect()` does the robot-side setup:
 
-1. Creates `UnitreeWebRTCConnection` using `WebRTCConnectionMethod.LocalSTA`.
+1. Resolves `GO2_WEBRTC_METHOD` into a `WebRTCConnectionMethod` such as `LocalSTA`.
 2. Connects to `GO2_IP`.
 3. Finds the pub/sub data channel.
 4. Loads `RTC_TOPIC`, `SPORT_CMD`, and optionally `SPORT_CMD_MCF`.

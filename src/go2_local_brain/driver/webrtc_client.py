@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -113,6 +114,12 @@ class Go2Config:
 
     ip: str
     aes_128_key: Optional[str] = None
+    webrtc_method: str = "LocalSTA"
+    serial_number: Optional[str] = None
+    remote_username: Optional[str] = None
+    remote_password: Optional[str] = None
+    remote_region: str = "global"
+    remote_device_type: str = "Go2"
     force_motion_mode: Optional[str] = None
     enable_exploration: bool = False
     exploration_min_obstacle_m: float = 0.35
@@ -155,12 +162,11 @@ class Go2WebRTCClient:
         except ImportError:
             SPORT_CMD_MCF = {}
 
-        kwargs: dict[str, Any] = {
-            "connectionMethod": WebRTCConnectionMethod.LocalSTA,
-            "ip": self._cfg.ip,
-        }
+        method = _resolve_webrtc_method(WebRTCConnectionMethod, self._cfg.webrtc_method)
+        kwargs = self._connection_kwargs(method)
         if self._cfg.aes_128_key:
             kwargs["aes_128_key"] = self._cfg.aes_128_key
+        self._log_connection_plan(method, kwargs)
 
         try:
             self._conn = UnitreeWebRTCConnection(**kwargs)
@@ -170,7 +176,10 @@ class Go2WebRTCClient:
                 kwargs["aesKey"] = self._cfg.aes_128_key
             self._conn = UnitreeWebRTCConnection(**kwargs)
 
-        await self._conn.connect()
+        try:
+            await self._conn.connect()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(_friendly_connect_error(exc, self._cfg, method)) from exc
         self._pubsub = self._find_pubsub(self._conn)
         if self._pubsub is None:
             raise RuntimeError("WebRTC data channel pub/sub interface not found")
@@ -198,6 +207,51 @@ class Go2WebRTCClient:
         log.info("Go2 WebRTC connected at %s", self._cfg.ip)
         self._last_cmd_ts = time.monotonic()
         self._deadman_task = asyncio.create_task(self._deadman_loop(), name="go2-deadman")
+
+    def _connection_kwargs(self, method: Any) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"connectionMethod": method}
+        method_name = _method_name(method)
+        if method_name == "LocalAP":
+            return kwargs
+        if method_name == "Remote":
+            if self._cfg.serial_number:
+                kwargs["serialNumber"] = self._cfg.serial_number
+            if self._cfg.remote_username:
+                kwargs["username"] = self._cfg.remote_username
+            if self._cfg.remote_password:
+                kwargs["password"] = self._cfg.remote_password
+            kwargs["region"] = self._cfg.remote_region
+            kwargs["device_type"] = self._cfg.remote_device_type
+            return kwargs
+        if self._cfg.ip:
+            kwargs["ip"] = self._cfg.ip
+        if self._cfg.serial_number:
+            kwargs["serialNumber"] = self._cfg.serial_number
+        return kwargs
+
+    def _log_connection_plan(self, method: Any, kwargs: dict[str, Any]) -> None:
+        method_name = _method_name(method)
+        local_ip = _local_ip_for_target(self._cfg.ip) if self._cfg.ip else None
+        if method_name == "LocalSTA":
+            signaling = f"http://{self._cfg.ip}:9991/con_notify or :8081 fallback"
+        elif method_name == "LocalAP":
+            signaling = "robot AP default signaling"
+        else:
+            signaling = f"Unitree remote TURN flow region={self._cfg.remote_region}"
+        redacted = {
+            key: ("***" if key in {"password", "aes_128_key", "aesKey"} else value)
+            for key, value in kwargs.items()
+            if key != "connectionMethod"
+        }
+        log.info(
+            "Go2 WebRTC connection plan: method=%s target_ip=%s signaling=%s aes_key=%s local_ip=%s args=%s",
+            method_name,
+            self._cfg.ip or "none",
+            signaling,
+            "present" if self._cfg.aes_128_key else "blank",
+            local_ip or "unknown",
+            redacted,
+        )
 
     async def close(self) -> None:
         """Cancel background tasks and tear down the WebRTC link."""
@@ -634,6 +688,70 @@ def _merge_sport_cmds(base: dict[str, int], *extras: dict[str, int]) -> dict[str
         for name, api_id in dict(table).items():
             merged.setdefault(name, api_id)
     return merged
+
+
+def _resolve_webrtc_method(enum: Any, requested: str) -> Any:
+    """Resolve a user-facing method name against the SDK enum."""
+    normalized = requested.strip().replace("-", "").replace("_", "").lower() or "localsta"
+    aliases = {
+        "sta": "LocalSTA",
+        "localsta": "LocalSTA",
+        "stal": "LocalSTA",
+        "local": "LocalSTA",
+        "ap": "LocalAP",
+        "localap": "LocalAP",
+        "remote": "Remote",
+        "stat": "Remote",
+    }
+    target = aliases.get(normalized, requested.strip())
+    for name in dir(enum):
+        if name.startswith("_"):
+            continue
+        if name.lower() == target.lower():
+            return getattr(enum, name)
+    available = [name for name in dir(enum) if not name.startswith("_")]
+    raise RuntimeError(f"unknown GO2_WEBRTC_METHOD={requested!r}; available methods: {available}")
+
+
+def _method_name(method: Any) -> str:
+    name = getattr(method, "name", None)
+    if isinstance(name, str):
+        return name
+    text = str(method)
+    return text.rsplit(".", 1)[-1]
+
+
+def _local_ip_for_target(target_ip: str) -> str | None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect((target_ip, 9991))
+            return str(sock.getsockname()[0])
+    except OSError:
+        return None
+
+
+def _friendly_connect_error(exc: Exception, cfg: Go2Config, method: Any) -> str:
+    exc_name = type(exc).__name__
+    method_name = _method_name(method)
+    base = (
+        f"Go2 WebRTC connect failed: method={method_name} target_ip={cfg.ip} "
+        f"aes_key={'present' if cfg.aes_128_key else 'blank'} error={exc_name}: {exc}"
+    )
+    if exc_name == "NoSdpAnswerError" or "NoSdpAnswer" in exc_name:
+        return (
+            f"{base}. Robot signaling accepted the request but returned no SDP answer. "
+            "On Go2 firmware 1.1.7 this usually means the robot WebRTC bridge is busy, wedged, "
+            "or confused by interface/routing changes. Keep GO2_WEBRTC_METHOD=LocalSTA, target "
+            "the robot wlan0 IP 192.168.123.121 first, stop other clients, then restart the robot "
+            "WebRTC bridge or roll back dog-side NAT/iptables changes before retrying."
+        )
+    if exc_name == "RobotBusyError":
+        return f"{base}. Another WebRTC client is probably connected; close phone apps/viewers and retry."
+    if exc_name == "LocalSignalingPortError":
+        return f"{base}. Neither local signaling port responded; check reachability to :9991 and :8081."
+    if exc_name in {"AesKeyRequiredError", "AesKeyRejectedError"}:
+        return f"{base}. Firmware requested AES authentication; set GO2_AES_128_KEY to the 32-hex key."
+    return base
 
 
 def _action_candidates(*names: str) -> list[tuple[str, Optional[dict[str, Any]]]]:

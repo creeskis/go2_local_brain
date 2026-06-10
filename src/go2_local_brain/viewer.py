@@ -14,6 +14,14 @@ from typing import Any
 from aiohttp import web
 
 from .config import load_config
+from .driver.webrtc_client import (
+    Go2Config,
+    Go2WebRTCClient,
+    _friendly_connect_error,
+    _local_ip_for_target,
+    _method_name,
+    _resolve_webrtc_method,
+)
 
 log = logging.getLogger(__name__)
 
@@ -76,10 +84,41 @@ class Go2BrowserViewer:
     async def _connect_robot(self) -> None:
         from unitree_webrtc_connect.webrtc_driver import UnitreeWebRTCConnection, WebRTCConnectionMethod  # type: ignore
 
+        cfg = load_config()
         self._state.status = "connecting"
         await self._broadcast_status()
-        self._conn = UnitreeWebRTCConnection(WebRTCConnectionMethod.LocalSTA, ip=self._robot_ip)
-        await self._conn.connect()
+        method = _resolve_webrtc_method(WebRTCConnectionMethod, cfg.go2_webrtc_method)
+        go2_cfg = Go2Config(
+            ip=self._robot_ip,
+            aes_128_key=cfg.go2_aes_128_key,
+            webrtc_method=cfg.go2_webrtc_method,
+            serial_number=cfg.go2_serial_number,
+            remote_username=cfg.go2_remote_username,
+            remote_password=cfg.go2_remote_password,
+            remote_region=cfg.go2_remote_region,
+            remote_device_type=cfg.go2_remote_device_type,
+        )
+        kwargs = Go2WebRTCClient(go2_cfg)._connection_kwargs(method)
+        if cfg.go2_aes_128_key:
+            kwargs["aes_128_key"] = cfg.go2_aes_128_key
+        log.info(
+            "viewer WebRTC connection plan: method=%s target_ip=%s aes_key=%s local_ip=%s",
+            _method_name(method),
+            self._robot_ip,
+            "present" if cfg.go2_aes_128_key else "blank",
+            _local_ip_for_target(self._robot_ip) or "unknown",
+        )
+        self._conn = UnitreeWebRTCConnection(**kwargs)
+        try:
+            await self._conn.connect()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                _friendly_connect_error(
+                    exc,
+                    cfg=go2_cfg,
+                    method=method,
+                )
+            ) from exc
         self._state.status = "connected"
 
         datachannel = getattr(self._conn, "datachannel", None)

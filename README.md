@@ -17,6 +17,7 @@ If you only need to run it, start with the install guides and command cheat shee
 - [Installation Guide 1: WSL Instance](#installation-guide-1-wsl-instance)
 - [Installation Guide 2: Jetson Orin Nano](#installation-guide-2-jetson-orin-nano)
 - [Recommended Jetson Runtime Layout](#recommended-jetson-runtime-layout)
+- [Jetson Networking Runbook](docs/jetson_networking.md)
 - [Python Concepts For Beginners](#python-concepts-for-beginners)
 - [Project Architecture](#project-architecture)
 - [How A Text Prompt Becomes Robot Motion](#how-a-text-prompt-becomes-robot-motion)
@@ -630,7 +631,7 @@ await client.advanced_action("backstand")
 ```mermaid
 flowchart TD
     Start["Go2WebRTCClient.connect()"] --> Import["Import UnitreeWebRTCConnection, RTC_TOPIC, SPORT_CMD"]
-    Import --> Build["Build LocalSTA connection args"]
+    Import --> Build["Build configured WebRTC connection args"]
     Build --> Connect["await conn.connect()"]
     Connect --> PubSub["Find datachannel pub/sub object"]
     PubSub --> Ready["Wait for data channel ready"]

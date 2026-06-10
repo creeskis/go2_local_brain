@@ -122,6 +122,12 @@ class AiAutonomyGui:
             Go2Config(
                 ip=cfg.go2_ip,
                 aes_128_key=cfg.go2_aes_128_key,
+                webrtc_method=cfg.go2_webrtc_method,
+                serial_number=cfg.go2_serial_number,
+                remote_username=cfg.go2_remote_username,
+                remote_password=cfg.go2_remote_password,
+                remote_region=cfg.go2_remote_region,
+                remote_device_type=cfg.go2_remote_device_type,
                 force_motion_mode=cfg.force_motion_mode,
                 enable_exploration=cfg.enable_exploration,
                 exploration_min_obstacle_m=cfg.exploration_min_obstacle_m,
