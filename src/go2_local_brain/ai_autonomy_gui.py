@@ -42,6 +42,8 @@ from .autonomy.perception import (
 )
 from .autonomy.route_learning import PathRunRecorder
 from .autonomy.supervisor import AutonomySupervisor
+from .autonomy.targeting import TargetingController, build_nerf_controller
+from .autonomy.workflows import WorkflowContext, WorkflowEngine
 from .config import load_config
 from .brain.local_llm import LocalRobotBrain
 from .driver.webrtc_client import Go2Config, Go2WebRTCClient
@@ -72,7 +74,9 @@ class AiAutonomyGui:
         face_detection: bool,
         follow_source: str,
         lidar_transform: LidarTransform | None = None,
+        nerf_backend: str = "logging",
     ) -> None:
+        self._nerf_backend = nerf_backend
         self._host = host
         self._port = port
         self._maps_dir = maps_dir
@@ -88,6 +92,11 @@ class AiAutonomyGui:
         self._client: Go2WebRTCClient | None = None
         self._brain: LocalRobotBrain | None = None
         self._supervisor: AutonomySupervisor | None = None
+        # Workflow engine + phone-user targeting. Built in run() once the
+        # driver exists. Nerf launcher defaults to the logging backend
+        # (never actuates hardware) unless --nerf-backend serial is passed.
+        self._workflows: WorkflowEngine | None = None
+        self._targeting: TargetingController | None = None
         self._patrol_map: PatrolMap | None = None
         self._local_map = LocalMapState()
         self._lidar_obstacles = LidarObstacleField()
@@ -143,6 +152,23 @@ class AiAutonomyGui:
         # auth gating.
         self._brain = LocalRobotBrain(self._client, model=cfg.ollama_model)
 
+        # Targeting + workflow engine. observe() feeds the latest perception
+        # observation into workflow steps; the workflow's robot facade is the
+        # driver itself (same clamps + deadman).
+        self._targeting = TargetingController(nerf=build_nerf_controller(self._nerf_backend))
+
+        async def _observe():
+            return self._latest_observation
+
+        self._workflows = WorkflowEngine(
+            WorkflowContext(
+                robot=self._client,
+                observe=_observe,
+                targeting=self._targeting,
+                event_sink=lambda m: log.info("workflow: %s", m),
+            )
+        )
+
         app = web.Application(client_max_size=1024 * 1024)
         app.router.add_get("/", self._index)
         app.router.add_get("/video.mjpg", self._video_stream)
@@ -163,6 +189,9 @@ class AiAutonomyGui:
         app.router.add_post("/api/manual/stop", self._manual_stop)
         app.router.add_post("/api/manual/sport", self._manual_sport)
         app.router.add_post("/api/brain", self._brain_prompt)
+        app.router.add_get("/api/workflow/list", self._workflow_list)
+        app.router.add_post("/api/workflow/{action}", self._workflow_action)
+        app.router.add_post("/api/nerf/{action}", self._nerf_action)
         app.router.add_post("/api/follow/{action}", self._follow_action)
         app.router.add_post("/api/autonomy/{action}", self._autonomy_action)
 
@@ -195,6 +224,10 @@ class AiAutonomyGui:
 
     async def _shutdown(self) -> None:
         await self._stop_follow()
+        if self._workflows is not None:
+            await self._workflows.stop()
+        if self._targeting is not None:
+            self._targeting.disarm()
         if self._perception_task is not None:
             self._perception_task.cancel()
             try:
@@ -493,6 +526,63 @@ class AiAutonomyGui:
             return web.json_response({"ok": False, "result": f"brain error: {exc}"}, status=500)
         self._last_result = f"brain: {result}"
         return web.json_response({"ok": True, "result": result, "status": self._status_payload()})
+
+    async def _workflow_list(self, _request: web.Request) -> web.Response:
+        if self._workflows is None:
+            return web.json_response({"ok": False, "result": "workflows not ready", "workflows": []}, status=503)
+        return web.json_response({"ok": True, "workflows": self._workflows.list_workflows()})
+
+    async def _workflow_action(self, request: web.Request) -> web.Response:
+        """start (with ?name= or JSON {name}) / stop / status the workflow engine."""
+        if self._workflows is None:
+            return web.json_response({"ok": False, "result": "workflows not ready"}, status=503)
+        action = request.match_info.get("action", "")
+        if action == "start":
+            payload = await _json_or_empty(request)
+            name = str(payload.get("name", "")).strip()
+            if not name:
+                return web.json_response({"ok": False, "result": "workflow name required"}, status=400)
+            # Workflows drive the robot; stop autonomy/follow so they don't fight.
+            await self._pause_autonomy_for_manual()
+            ok = await self._workflows.start(name)
+            self._last_result = f"workflow {name}: {'started' if ok else 'failed'}"
+            return web.json_response({"ok": ok, "result": self._last_result, "workflow": self._workflow_status()})
+        if action == "stop":
+            await self._workflows.stop()
+            self._last_result = "workflow stopped"
+            return web.json_response({"ok": True, "result": self._last_result, "workflow": self._workflow_status()})
+        if action == "status":
+            return web.json_response({"ok": True, "workflow": self._workflow_status()})
+        return web.json_response({"ok": False, "result": f"unknown action {action!r}"}, status=400)
+
+    async def _nerf_action(self, request: web.Request) -> web.Response:
+        """arm / disarm / status the Nerf launcher. Safe-by-default disarmed."""
+        if self._targeting is None:
+            return web.json_response({"ok": False, "result": "targeting not ready"}, status=503)
+        action = request.match_info.get("action", "")
+        if action == "arm":
+            self._targeting.arm()
+            self._last_result = "NERF ARMED"
+            log.warning("nerf armed via GUI from %s", request.remote)
+        elif action == "disarm":
+            self._targeting.disarm()
+            self._last_result = "nerf disarmed"
+        elif action != "status":
+            return web.json_response({"ok": False, "result": f"unknown action {action!r}"}, status=400)
+        return web.json_response({"ok": True, "result": self._last_result, "nerf": self._targeting.status()})
+
+    def _workflow_status(self) -> dict[str, Any]:
+        if self._workflows is None:
+            return {"state": "unavailable"}
+        s = self._workflows.status()
+        return {
+            "state": s.state,
+            "workflow": s.workflow,
+            "step_index": s.step_index,
+            "step_kind": s.step_kind,
+            "last_event": s.last_event,
+            "events": s.events[-12:],
+        }
 
     async def _follow_action(self, request: web.Request) -> web.Response:
         action = request.match_info["action"]
@@ -1027,6 +1117,25 @@ _INDEX_HTML = """<!doctype html>
       </div>
       <button class="stop" onclick="follow('stop')">Stop Follow</button>
 
+      <h2>Workflows</h2>
+      <select id="workflowSelect" style="width:100%;"></select>
+      <div class="grid" style="margin-top:4px;">
+        <button onclick="startWorkflow()">Run workflow</button>
+        <button class="stop" onclick="stopWorkflow()">Stop workflow</button>
+      </div>
+      <pre id="workflowStatus" style="max-height:120px;overflow:auto;">workflow idle</pre>
+
+      <h2>Nerf launcher</h2>
+      <p style="margin:0 0 4px;font-size:0.85em;color:#c66;">
+        Foam darts. Disarmed by default. Arming lets phone_tracker fire when a
+        phone-using person is centered + locked.
+      </p>
+      <div class="grid">
+        <button onclick="nerf('arm')" style="background:#722;">ARM</button>
+        <button onclick="nerf('disarm')">Disarm</button>
+      </div>
+      <pre id="nerfStatus" style="max-height:60px;overflow:auto;">nerf disarmed</pre>
+
       <h2>Brain (LLM prompts)</h2>
       <textarea id="brainPrompt" rows="3" placeholder="Type a command e.g. 'walk forward then turn left'" style="width:100%;box-sizing:border-box;"></textarea>
       <button onclick="sendBrainPrompt()" style="width:100%;margin-top:4px;">Send to brain</button>
@@ -1303,6 +1412,55 @@ _INDEX_HTML = """<!doctype html>
     // existing manualStop() which routes through /api/manual/stop.
     async function sportAction(name) { return manualSport(name); }
 
+    // Workflows: populate the dropdown once, then start/stop by name.
+    async function loadWorkflows() {
+      try {
+        const res = await fetch("/api/workflow/list");
+        const data = await res.json().catch(() => ({workflows: []}));
+        const sel = document.getElementById("workflowSelect");
+        if (!sel) return;
+        sel.innerHTML = "";
+        for (const wf of (data.workflows || [])) {
+          const opt = document.createElement("option");
+          opt.value = wf.name;
+          opt.textContent = wf.name + " - " + wf.description;
+          sel.appendChild(opt);
+        }
+      } catch (_) { /* ignore */ }
+    }
+    async function startWorkflow() {
+      const sel = document.getElementById("workflowSelect");
+      const name = sel ? sel.value : "";
+      if (!name) return;
+      const res = await fetch("/api/workflow/start", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name})});
+      const data = await res.json().catch(() => ({}));
+      renderWorkflowStatus(data.workflow);
+    }
+    async function stopWorkflow() {
+      const res = await fetch("/api/workflow/stop", {method:"POST"});
+      const data = await res.json().catch(() => ({}));
+      renderWorkflowStatus(data.workflow);
+    }
+    function renderWorkflowStatus(wf) {
+      const out = document.getElementById("workflowStatus");
+      if (!out) return;
+      if (!wf) { out.textContent = "workflow idle"; return; }
+      const lines = [
+        `state: ${wf.state}`,
+        `workflow: ${wf.workflow || "-"}`,
+        `step: ${wf.step_kind || "-"} (#${wf.step_index})`,
+      ];
+      if (wf.events && wf.events.length) lines.push("", ...wf.events.slice(-6));
+      out.textContent = lines.join("\\n");
+    }
+    async function nerf(action) {
+      const res = await fetch(`/api/nerf/${action}`, {method:"POST"});
+      const data = await res.json().catch(() => ({}));
+      const out = document.getElementById("nerfStatus");
+      if (out && data.nerf) out.textContent = `armed: ${data.nerf.armed} | shots: ${data.nerf.shots} | ${data.nerf.backend}`;
+    }
+    document.addEventListener("DOMContentLoaded", loadWorkflows);
+
     // Brain prompt -- types into the textarea then POST /api/brain.
     async function sendBrainPrompt() {
       const ta = document.getElementById("brainPrompt");
@@ -1562,6 +1720,14 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow autonomy activation with camera-only perception while object detection is not configured",
     )
+    parser.add_argument(
+        "--nerf-backend",
+        choices=["logging", "serial"],
+        default="logging",
+        help="Nerf launcher backend. 'logging' (default) never actuates hardware; "
+             "'serial' writes a trigger byte to the Arduino. Either way firing "
+             "requires explicit arming + a locked phone-using target.",
+    )
     return parser.parse_args()
 
 
@@ -1587,6 +1753,7 @@ async def _amain() -> None:
             flip_y=args.lidar_flip_y,
             swap_xy=args.lidar_swap_xy,
         ),
+        nerf_backend=args.nerf_backend,
     ).run()
 
 
