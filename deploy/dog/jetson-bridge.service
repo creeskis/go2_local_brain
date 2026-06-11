@@ -1,25 +1,33 @@
 [Unit]
-Description=Add 10.42.0.0/24 bridge subnet for Jetson NAT
+Description=Jetson NAT bridge (10.42.0.0/24 via wlan0)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Add the bridge IP alongside the dog's existing eth0 addresses.
-# 2>/dev/null + || true so re-applies don't fail when the address is
-# already present.
-ExecStart=/bin/sh -c '/usr/sbin/ip addr add 10.42.0.1/24 dev eth0 2>/dev/null || true'
-ExecStart=/usr/sbin/sysctl -w net.ipv4.ip_forward=1
-ExecStart=/usr/sbin/iptables -t nat -A POSTROUTING -s 10.42.0.0/24 -o wlan0 -j MASQUERADE
-ExecStart=/usr/sbin/iptables -A FORWARD -i eth0 -s 10.42.0.0/24 -o wlan0 -j ACCEPT
-ExecStart=/usr/sbin/iptables -A FORWARD -i wlan0 -o eth0 -d 10.42.0.0/24 -m state --state RELATED,ESTABLISHED -j ACCEPT
-# Symmetric teardown so systemctl disable --now undoes everything cleanly.
-ExecStop=/bin/sh -c '/usr/sbin/ip addr del 10.42.0.1/24 dev eth0 2>/dev/null || true'
-ExecStop=/usr/sbin/sysctl -w net.ipv4.ip_forward=0
-ExecStop=/bin/sh -c '/usr/sbin/iptables -t nat -D POSTROUTING -s 10.42.0.0/24 -o wlan0 -j MASQUERADE 2>/dev/null || true'
-ExecStop=/bin/sh -c '/usr/sbin/iptables -D FORWARD -i eth0 -s 10.42.0.0/24 -o wlan0 -j ACCEPT 2>/dev/null || true'
-ExecStop=/bin/sh -c '/usr/sbin/iptables -D FORWARD -i wlan0 -o eth0 -d 10.42.0.0/24 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true'
+
+# Wait up to 30s for both interfaces to exist before configuring them.
+# Handles the boot-timing case where this fires before the dog's network
+# stack has created eth0 / wlan0.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do ip link show eth0 >/dev/null 2>&1 && ip link show wlan0 >/dev/null 2>&1 && exit 0; sleep 1; done; echo "eth0/wlan0 not ready" >&2; exit 1'
+
+# Add the bridge address only if missing (idempotent -> no "File exists"
+# failure on a re-run or after a manual fix already added it).
+ExecStart=/bin/sh -c 'ip -4 addr show dev eth0 | grep -q "10.42.0.1/24" || ip addr add 10.42.0.1/24 dev eth0'
+ExecStart=/sbin/sysctl -w net.ipv4.ip_forward=1
+# iptables: check-then-add so re-runs never stack duplicate rules.
+ExecStart=/bin/sh -c 'iptables -t nat -C POSTROUTING -s 10.42.0.0/24 -o wlan0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.42.0.0/24 -o wlan0 -j MASQUERADE'
+ExecStart=/bin/sh -c 'iptables -C FORWARD -i eth0 -s 10.42.0.0/24 -o wlan0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i eth0 -s 10.42.0.0/24 -o wlan0 -j ACCEPT'
+ExecStart=/bin/sh -c 'iptables -C FORWARD -i wlan0 -o eth0 -d 10.42.0.0/24 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wlan0 -o eth0 -d 10.42.0.0/24 -m state --state RELATED,ESTABLISHED -j ACCEPT'
+
+# Teardown: leading "-" tells systemd to ignore failures so a disable /
+# stop always succeeds even if a rule was already gone.
+ExecStop=-/bin/sh -c 'ip addr del 10.42.0.1/24 dev eth0 2>/dev/null'
+ExecStop=-/sbin/sysctl -w net.ipv4.ip_forward=0
+ExecStop=-/bin/sh -c 'iptables -t nat -D POSTROUTING -s 10.42.0.0/24 -o wlan0 -j MASQUERADE 2>/dev/null'
+ExecStop=-/bin/sh -c 'iptables -D FORWARD -i eth0 -s 10.42.0.0/24 -o wlan0 -j ACCEPT 2>/dev/null'
+ExecStop=-/bin/sh -c 'iptables -D FORWARD -i wlan0 -o eth0 -d 10.42.0.0/24 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null'
 
 [Install]
 WantedBy=multi-user.target

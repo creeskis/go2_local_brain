@@ -11,9 +11,11 @@ WorkingDirectory=@REPO@
 Environment=HOME=@HOME@
 EnvironmentFile=-@REPO@/.env
 EnvironmentFile=-@HOME@/.go2/env.local
-# Bind to all interfaces. The bearer-token auth (printed in the journal at
-# startup) gates POST /api/... so the LAN can see but not drive without it.
-ExecStart=@VENV@/bin/python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775
+# Bind to all interfaces with a STABLE auth token from env so the laptop
+# URL doesn't change every restart. Set GO2_GUI_TOKEN in ~/.go2/env.local
+# (the installer generates one). If unset, --auth-token "" with empty value
+# would be rejected, so the installer guarantees it is set.
+ExecStart=@VENV@/bin/python -m go2_local_brain.ai_autonomy_gui --host 0.0.0.0 --port 8775 --auth-token ${GO2_GUI_TOKEN}
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

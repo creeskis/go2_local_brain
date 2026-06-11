@@ -40,6 +40,16 @@ class FindPhoneUsersTests(unittest.TestCase):
     def test_no_phone_no_users(self) -> None:
         self.assertEqual(find_phone_users(_obs([_person(320, 240)])), [])
 
+    def test_pixel_coords_without_frame_width_are_skipped(self) -> None:
+        # Safety: a target whose pixel position can't be normalized (no
+        # frame width) must NOT become a fake-centered, fireable target.
+        obs = Observation(
+            timestamp=0.0, frame_available=True,
+            detections=[_person(320, 240), _phone(320, 260)],
+            frame_width=None, frame_height=None,
+        )
+        self.assertEqual(find_phone_users(obs), [])
+
     def test_users_sorted_by_centeredness(self) -> None:
         # Two phone users; the more-centered one comes first.
         dets = [

@@ -65,7 +65,7 @@ def load_config() -> AppConfig:
     remote_password = os.getenv("GO2_REMOTE_PASSWORD", "").strip() or None
     remote_region = os.getenv("GO2_REMOTE_REGION", "global").strip() or "global"
     remote_device_type = os.getenv("GO2_REMOTE_DEVICE_TYPE", "Go2").strip() or "Go2"
-    ollama_model = os.getenv("OLLAMA_MODEL", "qwen3:1.7b").strip()
+    ollama_model = os.getenv("OLLAMA_MODEL", "gemma3:4b").strip()
     raw_mode = os.getenv("FORCE_MOTION_MODE", "").strip()
     force_mode = raw_mode if raw_mode else None
 

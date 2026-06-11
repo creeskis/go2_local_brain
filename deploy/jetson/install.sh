@@ -84,6 +84,13 @@ if [[ ! -f "${ENV_LOCAL}" ]]; then
     } > "${ENV_LOCAL}"
     chown "${GO2_USER}:${GO2_USER}" "${ENV_LOCAL}"
 fi
+# Ensure a stable GUI auth token exists so the browser URL is consistent
+# across restarts. The systemd unit passes --auth-token ${GO2_GUI_TOKEN}.
+if ! grep -q '^GO2_GUI_TOKEN=' "${ENV_LOCAL}" 2>/dev/null; then
+    TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+    echo "GO2_GUI_TOKEN=${TOKEN}" >> "${ENV_LOCAL}"
+    say "   generated GUI auth token; browser URL: http://<jetson-ip>:8775/?token=${TOKEN}"
+fi
 
 # -- 5. Ollama -----------------------------------------------------------------
 say "5/6  Ollama"

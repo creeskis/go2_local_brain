@@ -206,10 +206,15 @@ def find_phone_users(observation: Observation) -> list[PhoneUser]:
     users: list[PhoneUser] = []
     for phone in phones:
         host = _person_containing(phone, persons)
-        if host is None:
+        if host is None or host.x is None:
             continue
-        center_x = host.x if host.x is not None else 0.0
-        center_norm = _normalize_x(center_x, fw)
+        center_norm = _normalize_x(host.x, fw)
+        # Can't locate the target in normalized frame coords -> skip it.
+        # Returning a fake "centered" 0.5 here would let the launcher
+        # lock + fire at something it can't actually place. No target is
+        # the safe outcome.
+        if center_norm is None:
+            continue
         users.append(PhoneUser(person=host, phone=phone, center_x_norm=center_norm))
 
     users.sort(key=lambda u: abs(u.horizontal_error))
@@ -323,11 +328,16 @@ def _person_containing(phone: Detection, persons: list[Detection]) -> Optional[D
     return best
 
 
-def _normalize_x(x: float, frame_width: Optional[int]) -> float:
+def _normalize_x(x: float, frame_width: Optional[int]) -> Optional[float]:
+    """Normalize a horizontal position to [0,1], or None if undeterminable.
+
+    None means "we can't place this target" — callers must NOT treat that as
+    centered. Pixel coords without a known frame width are undeterminable.
+    """
     if x <= 1.0:
         return x  # already normalized
     if not frame_width:
-        return 0.5  # unknown frame -> assume centered, don't fire blindly
+        return None
     return max(0.0, min(1.0, x / frame_width))
 
 

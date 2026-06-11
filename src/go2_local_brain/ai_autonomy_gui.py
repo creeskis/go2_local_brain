@@ -75,7 +75,9 @@ class AiAutonomyGui:
         follow_source: str,
         lidar_transform: LidarTransform | None = None,
         nerf_backend: str = "logging",
+        auth_token: str | None = None,
     ) -> None:
+        self._auth_token = auth_token
         self._nerf_backend = nerf_backend
         self._host = host
         self._port = port
@@ -169,7 +171,23 @@ class AiAutonomyGui:
             )
         )
 
-        app = web.Application(client_max_size=1024 * 1024)
+        # Bearer-token auth middleware gates POST /api/... (movement,
+        # autonomy, follow, AND nerf arming). GET routes (video/status)
+        # stay open. With a Nerf launcher on the back this is not optional
+        # on a shared network.
+        from .auth import make_auth_middleware
+
+        app = web.Application(
+            client_max_size=1024 * 1024,
+            middlewares=[make_auth_middleware(self._auth_token)],
+        )
+        if self._auth_token is None and self._host not in {"127.0.0.1", "localhost"}:
+            log.warning(
+                "GUI on %s:%s has auth DISABLED and is NOT loopback-bound — "
+                "anyone on the network can drive the robot and arm the Nerf. "
+                "Pass --auth-token (or omit it for an auto-generated one).",
+                self._host, self._port,
+            )
         app.router.add_get("/", self._index)
         app.router.add_get("/video.mjpg", self._video_stream)
         app.router.add_get("/status.json", self._status_json)
@@ -318,8 +336,20 @@ class AiAutonomyGui:
                 self._video_frames += 1
                 self._state_changed.notify_all()
 
-    async def _index(self, _request: web.Request) -> web.Response:
-        return web.Response(text=_INDEX_HTML, content_type="text/html")
+    async def _index(self, request: web.Request) -> web.Response:
+        from .auth import inject_token
+        # When auth is on, gate the page itself on ?token= so a LAN scanner
+        # can't read the HTML and harvest the token from the JS.
+        if self._auth_token is not None:
+            import secrets
+            supplied = request.query.get("token", "")
+            if not supplied or not secrets.compare_digest(supplied, self._auth_token):
+                return web.Response(
+                    status=401,
+                    text="401: open http://<host>:<port>/?token=<token> — the token was printed in the GUI's terminal at startup.\n",
+                    content_type="text/plain",
+                )
+        return web.Response(text=inject_token(_INDEX_HTML, self._auth_token), content_type="text/html")
 
     async def _status_json(self, _request: web.Request) -> web.Response:
         return web.json_response(self._status_payload())
@@ -569,7 +599,12 @@ class AiAutonomyGui:
             self._last_result = "nerf disarmed"
         elif action != "status":
             return web.json_response({"ok": False, "result": f"unknown action {action!r}"}, status=400)
-        return web.json_response({"ok": True, "result": self._last_result, "nerf": self._targeting.status()})
+        # Return the launcher's own status (armed/shots/backend at top level)
+        # so the GUI JS can read data.nerf.armed directly, plus the
+        # controller's fire count for context.
+        nerf_status = dict(self._targeting.nerf.status())
+        nerf_status["fires"] = self._targeting.status().get("fires", 0)
+        return web.json_response({"ok": True, "result": self._last_result, "nerf": nerf_status})
 
     def _workflow_status(self) -> dict[str, Any]:
         if self._workflows is None:
@@ -1166,6 +1201,18 @@ _INDEX_HTML = """<!doctype html>
  
 
   <script>
+    // Server-injected auth token (empty when auth disabled). Wrap fetch once
+    // so every POST carries the bearer header without editing each call site.
+    const AUTH_TOKEN = "__GO2_AUTH_TOKEN__";
+    if (AUTH_TOKEN) {
+      const __origFetch = window.fetch;
+      window.fetch = function(url, opts) {
+        opts = opts || {};
+        opts.headers = Object.assign({}, opts.headers || {}, {"Authorization": "Bearer " + AUTH_TOKEN});
+        return __origFetch(url, opts);
+      };
+    }
+
     let loadedEditorPath = null;
     let lastRobotPose = {x: 0, y: 0, yaw: 0};
     let latestLocalMap = {valid:false, source:"waiting", trail:[]};
@@ -1696,7 +1743,15 @@ _INDEX_HTML = """<!doctype html>
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Go2 AI-only autonomy browser GUI")
-    parser.add_argument("--host", default="0.0.0.0")
+    # Loopback by default so a fresh boot can't be driven (or armed) from the
+    # LAN without an explicit opt-in. The Jetson systemd unit passes
+    # --host 0.0.0.0 deliberately, paired with an auth token.
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="Bind address (default 127.0.0.1; 0.0.0.0 or --bind-public for LAN)")
+    parser.add_argument("--bind-public", action="store_true", help="Shortcut for --host 0.0.0.0")
+    parser.add_argument("--auth-token", default=None,
+                        help="Bearer token for /api POSTs. Default: auto-generate + print at startup.")
+    parser.add_argument("--no-auth", action="store_true", help="Disable bearer-token auth (NOT recommended).")
     parser.add_argument("--port", type=int, default=8775)
     parser.add_argument("--maps-dir", default="maps", help="Directory for saved patrol maps")
     parser.add_argument("--map", default="", help="Optional patrol map JSON to load at startup")
@@ -1735,8 +1790,20 @@ async def _amain() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     args = _parse_args()
     map_path = Path(args.map) if args.map else None
+
+    from .auth import generate_token
+    host = "0.0.0.0" if args.bind_public else args.host
+    if args.no_auth:
+        token: str | None = None
+    elif args.auth_token:
+        token = args.auth_token
+    else:
+        token = generate_token()
+        print(f"=== GUI auth token: {token}", flush=True)
+        print(f"=== Open: http://{host}:{args.port}/?token={token}", flush=True)
+
     await AiAutonomyGui(
-        args.host,
+        host,
         args.port,
         Path(args.maps_dir),
         map_path,
@@ -1754,6 +1821,7 @@ async def _amain() -> None:
             swap_xy=args.lidar_swap_xy,
         ),
         nerf_backend=args.nerf_backend,
+        auth_token=token,
     ).run()
 
 

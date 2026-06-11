@@ -26,6 +26,18 @@ audio = [
     "sounddevice",
     "numpy",
 ]
+# Face recognition. Pick one backend; insightface is the Jetson-GPU path.
+faces = [
+    "insightface",
+    "onnxruntime",
+]
+faces-dlib = [
+    "face_recognition",
+]
+# Arduino-driven Nerf launcher trigger over serial.
+nerf = [
+    "pyserial",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
