@@ -42,6 +42,14 @@ from .autonomy.perception import (
 )
 from .autonomy.route_learning import PathRunRecorder
 from .autonomy.supervisor import AutonomySupervisor
+from .autonomy.control_modes import (
+    ControlMode,
+    SpeedLevel,
+    mode_enter_action,
+    next_speed,
+    resolve_held,
+    resolve_press,
+)
 from .autonomy.targeting import TargetingController, build_nerf_controller
 from .autonomy.workflows import WorkflowContext, WorkflowEngine
 from .config import load_config
@@ -79,6 +87,9 @@ class AiAutonomyGui:
     ) -> None:
         self._auth_token = auth_token
         self._nerf_backend = nerf_backend
+        # Direct-control terminal state (Feature 1). Server owns mode + speed.
+        self._control_mode = ControlMode.NORMAL
+        self._control_speed = SpeedLevel.NORMAL
         self._host = host
         self._port = port
         self._maps_dir = maps_dir
@@ -206,6 +217,10 @@ class AiAutonomyGui:
         app.router.add_post("/api/manual/move", self._manual_move)
         app.router.add_post("/api/manual/stop", self._manual_stop)
         app.router.add_post("/api/manual/sport", self._manual_sport)
+        app.router.add_post("/api/control/mode", self._control_set_mode)
+        app.router.add_post("/api/control/speed", self._control_set_speed)
+        app.router.add_post("/api/control/keys", self._control_keys)
+        app.router.add_post("/api/control/press", self._control_press)
         app.router.add_post("/api/brain", self._brain_prompt)
         app.router.add_get("/api/workflow/list", self._workflow_list)
         app.router.add_post("/api/workflow/{action}", self._workflow_action)
@@ -530,6 +545,85 @@ class AiAutonomyGui:
             return web.json_response({"ok": False, "result": f"{name} failed: {exc}"}, status=400)
         self._last_result = f"manual sport {name}"
         return web.json_response({"ok": True, "result": self._last_result, "status": self._status_payload()})
+
+    # -------- Feature 1: direct-control modes (server owns mode + speed) -----
+
+    def _control_state(self) -> dict[str, Any]:
+        return {
+            "mode": self._control_mode.value,
+            "speed": self._control_speed.value,
+            "modes": [m.value for m in ControlMode],
+            "speeds": [s.value for s in SpeedLevel],
+        }
+
+    async def _control_set_mode(self, request: web.Request) -> web.Response:
+        if self._client is None:
+            return web.json_response({"ok": False, "result": "robot client is not ready"}, status=503)
+        payload = await _json_or_empty(request)
+        raw = str(payload.get("mode", "")).strip().lower()
+        try:
+            mode = ControlMode(raw)
+        except ValueError:
+            return web.json_response({"ok": False, "result": f"unknown mode {raw!r}"}, status=400)
+        await self._pause_autonomy_for_manual()
+        await self._client.stop()
+        self._control_mode = mode
+        # Put the dog in the posture the mode needs (balance stand, or backstand).
+        action = mode_enter_action(mode)
+        note = ""
+        if action is not None:
+            try:
+                await self._client.advanced_action(action)
+            except Exception as exc:  # noqa: BLE001
+                note = f" (enter-action {action} failed: {exc})"
+        self._last_result = f"mode -> {mode.value}{note}"
+        return web.json_response({"ok": True, "result": self._last_result, "control": self._control_state()})
+
+    async def _control_set_speed(self, request: web.Request) -> web.Response:
+        payload = await _json_or_empty(request)
+        raw = str(payload.get("level", "")).strip().lower()
+        if raw:
+            try:
+                self._control_speed = SpeedLevel(raw)
+            except ValueError:
+                return web.json_response({"ok": False, "result": f"unknown speed {raw!r}"}, status=400)
+        else:
+            self._control_speed = next_speed(self._control_speed)
+        self._last_result = f"speed -> {self._control_speed.value}"
+        return web.json_response({"ok": True, "result": self._last_result, "control": self._control_state()})
+
+    async def _control_keys(self, request: web.Request) -> web.Response:
+        """Continuous (held-keys) path; only drives in NORMAL mode."""
+        if self._client is None:
+            return web.json_response({"ok": False, "result": "robot client is not ready"}, status=503)
+        payload = await _json_or_empty(request)
+        keys = {str(k).lower() for k in (payload.get("keys") or [])}
+        cmd = resolve_held(self._control_mode, self._control_speed, keys)
+        if cmd.kind == "velocity":
+            await self._pause_autonomy_for_manual()
+            await self._client.move(cmd.vx, cmd.vy, cmd.vyaw, cmd.duration_s)
+        elif cmd.kind == "stop":
+            await self._client.stop()
+        # "noop" (non-normal modes) -> do nothing here; presses drive those.
+        return web.json_response({"ok": True, "kind": cmd.kind, "note": cmd.note, "control": self._control_state()})
+
+    async def _control_press(self, request: web.Request) -> web.Response:
+        """Discrete key-down path for flip / jump modes (and Space->stop)."""
+        if self._client is None:
+            return web.json_response({"ok": False, "result": "robot client is not ready"}, status=503)
+        payload = await _json_or_empty(request)
+        key = str(payload.get("key", ""))
+        cmd = resolve_press(self._control_mode, key)
+        if cmd.kind == "stop":
+            await self._client.stop()
+        elif cmd.kind == "action" and cmd.action:
+            await self._pause_autonomy_for_manual()
+            try:
+                await self._client.advanced_action(cmd.action)
+            except Exception as exc:  # noqa: BLE001
+                return web.json_response({"ok": False, "result": f"{cmd.action} failed: {exc}", "note": cmd.note}, status=400)
+        self._last_result = f"press {key!r}: {cmd.note or cmd.kind}"
+        return web.json_response({"ok": True, "kind": cmd.kind, "action": cmd.action, "note": cmd.note, "control": self._control_state()})
 
     async def _brain_prompt(self, request: web.Request) -> web.Response:
         """Run an LLM tool call from a typed prompt.
@@ -1182,10 +1276,19 @@ _INDEX_HTML = """<!doctype html>
         <button onclick="sportAction('Sit')">Sit</button>
         <button class="stop" onclick="manualStop()">STOP</button>
       </div>
-      <p style="margin-top:4px;font-size:0.85em;color:#888;">
-        WASD = move, Q/E = yaw, Space = stop. Click here first to capture keys.
+
+      <h2>Drive modes</h2>
+      <div class="grid">
+        <button onclick="setMode('normal')">Normal</button>
+        <button onclick="setMode('flip')">Flip</button>
+        <button onclick="setMode('jump')">Jump</button>
+        <button onclick="setMode('backstand')">BackStand</button>
+      </div>
+      <button onclick="cycleSpeed()" style="width:100%;margin-top:4px;">Speed: <span id="speedLabel">normal</span> (cycle)</button>
+      <p style="margin-top:4px;font-size:0.85em;color:#888;" id="modeHelp">
+        normal: W/S=fwd/back, A/D=strafe, Q/E=turn, Space=stop (hold to move).
       </p>
-      <button id="wasdToggle" onclick="toggleWasd()" style="width:100%;">Enable WASD</button>
+      <button id="wasdToggle" onclick="toggleWasd()" style="width:100%;">Enable keyboard</button>
 
       <h2>Status</h2>
       <pre id="status">waiting</pre>
@@ -1540,55 +1643,81 @@ _INDEX_HTML = """<!doctype html>
     // anywhere else on the page. Click the toggle to enable; click again or
     // press Escape to disable. Each held key sends a fresh manual move at
     // ~10 Hz, and Space sends a hard stop.
+    // Mode-aware keyboard control. The server owns the active mode + speed
+    // (/api/control/*). In NORMAL mode held keys stream to /api/control/keys
+    // at 10 Hz (continuous velocity). In flip/jump/backstand modes a key DOWN
+    // sends one /api/control/press (discrete action). Space always stops.
     let wasdEnabled = false;
+    let controlMode = "normal";
     const wasdHeld = new Set();
     let wasdInterval = null;
-    const WASD_VX = 0.30, WASD_VY = 0.25, WASD_VYAW = 0.60, WASD_DURATION = 0.25;
+    const MODE_HELP = {
+      normal: "normal: W/S=fwd/back, A/D=strafe, Q/E=turn, Space=stop (hold to move).",
+      flip: "flip: W/S/A/D = front/back/left/right flip (one per press).",
+      jump: "jump: W = forward jump (firmware has no side/back jump).",
+      backstand: "backstand: static posture; WASD does not drive it (firmware limit).",
+    };
+    async function setMode(mode) {
+      const res = await fetch("/api/control/mode", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({mode})});
+      const data = await res.json().catch(() => ({}));
+      if (data.control) applyControlState(data.control);
+    }
+    async function cycleSpeed() {
+      const res = await fetch("/api/control/speed", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({})});
+      const data = await res.json().catch(() => ({}));
+      if (data.control) applyControlState(data.control);
+    }
+    function applyControlState(c) {
+      controlMode = c.mode || "normal";
+      const sl = document.getElementById("speedLabel");
+      if (sl) sl.textContent = c.speed || "normal";
+      const help = document.getElementById("modeHelp");
+      if (help) help.textContent = MODE_HELP[controlMode] || controlMode;
+    }
     function toggleWasd() {
       wasdEnabled = !wasdEnabled;
       const btn = document.getElementById("wasdToggle");
       if (wasdEnabled) {
-        btn.textContent = "Disable WASD (active)";
+        btn.textContent = "Disable keyboard (active)";
         btn.style.background = "#264";
       } else {
-        btn.textContent = "Enable WASD";
+        btn.textContent = "Enable keyboard";
         btn.style.background = "";
         wasdHeld.clear();
         if (wasdInterval) { clearInterval(wasdInterval); wasdInterval = null; }
         manualStop();
       }
     }
-    function wasdVelocity() {
-      let vx = 0, vy = 0, vyaw = 0;
-      if (wasdHeld.has("w")) vx += WASD_VX;
-      if (wasdHeld.has("s")) vx -= WASD_VX;
-      if (wasdHeld.has("a")) vy += WASD_VY;
-      if (wasdHeld.has("d")) vy -= WASD_VY;
-      if (wasdHeld.has("q")) vyaw += WASD_VYAW;
-      if (wasdHeld.has("e")) vyaw -= WASD_VYAW;
-      return {vx, vy, vyaw};
-    }
     async function wasdTick() {
-      const v = wasdVelocity();
-      if (!v.vx && !v.vy && !v.vyaw) return;
-      const body = {vx: v.vx, vy: v.vy, vyaw: v.vyaw, duration_s: WASD_DURATION};
+      // NORMAL mode only: stream the held keys; server resolves velocity.
+      if (controlMode !== "normal") return;
       try {
-        await fetch("/api/manual/move", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+        await fetch("/api/control/keys", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({keys:[...wasdHeld]})});
       } catch (_) { /* swallow transient errors during fast key changes */ }
+    }
+    async function controlPress(key) {
+      try {
+        await fetch("/api/control/press", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({key})});
+      } catch (_) {}
     }
     document.addEventListener("keydown", (ev) => {
       if (!wasdEnabled) return;
-      // Don't fight text inputs / textareas.
       const tag = (document.activeElement && document.activeElement.tagName) || "";
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       const k = ev.key.toLowerCase();
-      if (k === " " || k === "spacebar") { ev.preventDefault(); manualStop(); return; }
+      if (k === " " || k === "spacebar") { ev.preventDefault(); controlPress(" "); return; }
       if (k === "escape") { toggleWasd(); return; }
       if (!"wasdqe".includes(k)) return;
       ev.preventDefault();
-      if (!wasdHeld.has(k)) {
-        wasdHeld.add(k);
-        if (!wasdInterval) wasdInterval = setInterval(wasdTick, 100);
+      if (ev.repeat) return;  // ignore auto-repeat
+      if (controlMode === "normal") {
+        if (!wasdHeld.has(k)) {
+          wasdHeld.add(k);
+          if (!wasdInterval) wasdInterval = setInterval(wasdTick, 100);
+        }
+      } else {
+        // Discrete-action modes: one action per physical key press.
+        controlPress(k);
       }
     });
     document.addEventListener("keyup", (ev) => {

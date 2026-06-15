@@ -52,6 +52,14 @@ _ADVANCED_ACTIONS: dict[str, list[tuple[str, Optional[dict[str, Any]]]]] = {
     "bound": [("FreeBound", {"data": True}), ("Bound", None)],
     "handstand": [("HandStand", {"data": True}), ("Handstand", None)],
     "backstand": [("BackStand", {"data": True})],
+    # Directional flips. MCF table (1.1.7) ids differ from base; the driver's
+    # _sport_request_first tries MCF first then base, so listing the command
+    # name once resolves in whichever table the SDK exposes. RightFlip is
+    # base-only on this SDK, so it falls back to that automatically.
+    "front_flip": [("FrontFlip", {"data": True})],
+    "back_flip": [("BackFlip", {"data": True})],
+    "left_flip": [("LeftFlip", {"data": True})],
+    "right_flip": [("RightFlip", {"data": True})],
     "moonwalk": [("MoonWalk", None)],
     "wallow": [("Wallow", None)],
 }

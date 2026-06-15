@@ -62,7 +62,13 @@ def _make_client_with_fake(pubsub: _FakePubSub, cfg: Go2Config | None = None) ->
     client._sport_cmd_mcf = {
         "HandStand": 2044,
         "BackStand": 2050,
+        "FrontFlip": 1030,
+        "BackFlip": 2043,
+        "LeftFlip": 2041,
     }
+    # RightFlip is base-only on the real SDK; mirror that here.
+    client._sport_cmd["RightFlip"] = 1043
+    client._sport_cmd["FrontFlip"] = 1030
     return client
 
 
@@ -163,6 +169,25 @@ class AdvancedActionTests(unittest.TestCase):
         client = _make_client_with_fake(pubsub)
         asyncio.run(client.advanced_action("backstand"))
         self.assertEqual(pubsub.requests[-1], ("rt/api/sport/request", {"api_id": 2050, "parameter": {"data": True}}))
+
+    def test_directional_flips_resolve(self) -> None:
+        # front/back/left flips resolve via the MCF table; right flip is
+        # base-only and must still resolve.
+        cases = {
+            "front_flip": 1030,
+            "back_flip": 2043,
+            "left_flip": 2041,
+            "right_flip": 1043,
+        }
+        for action, api_id in cases.items():
+            pubsub = _FakePubSub()
+            client = _make_client_with_fake(pubsub)
+            asyncio.run(client.advanced_action(action))
+            self.assertEqual(
+                pubsub.requests[-1],
+                ("rt/api/sport/request", {"api_id": api_id, "parameter": {"data": True}}),
+                f"{action} resolved wrong",
+            )
 
     def test_exact_sport_command_uses_mcf_candidate(self) -> None:
         pubsub = _FakePubSub()
