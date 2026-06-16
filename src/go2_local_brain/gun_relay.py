@@ -80,6 +80,19 @@ class GunRelay:
                 raise RuntimeError(f"fire command exited immediately: {detail or 'no stderr'}")
             return "fire active"
 
+    async def test(self) -> str:
+        args = self._ssh_base_args(control_master=False) + [self._target(), "printf relay-ok"]
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            detail = (stderr or stdout).decode(errors="replace").strip()
+            raise RuntimeError(detail or f"ssh exited {proc.returncode}")
+        return stdout.decode(errors="replace").strip() or "relay-ok"
+
     async def stop(self) -> str:
         async with self._lock:
             proc = self._proc

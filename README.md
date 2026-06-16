@@ -86,6 +86,7 @@ GUN_JETSON_USER=unitree
 GUN_JETSON_PASSWORD=
 GUN_FIRE_COMMAND=cat /dev/ttyUSB0 | xxd
 GUN_STOP_COMMAND=printf '\x30' > /dev/ttyUSB0
+GO2_FACE_BACKEND=face_recognition
 ```
 
 The `Hold Fire` button starts the remote USB command through an SSH jump
@@ -95,6 +96,29 @@ Ctrl+C/terminates the command.
 If you use passwords instead of SSH keys, install `sshpass` in the WSL instance
 and set `GUN_DOG_PASSWORD` and `GUN_JETSON_PASSWORD` in your local `.env`.
 Do not commit those password values.
+
+```bash
+sudo apt install -y sshpass
+```
+
+The gun buttons use this path:
+
+```text
+computer -> ssh root@192.168.123.121 -> ssh unitree@10.42.0.2
+```
+
+`Test SSH` runs `printf relay-ok` on the Jetson. `Hold Fire` starts
+`cat /dev/ttyUSB0 | xxd`. `Stop Fire` sends Ctrl+C and then runs
+`printf '\x30' > /dev/ttyUSB0`.
+
+FaceID enrollment requires a face embedding backend. For CPU use:
+
+```bash
+pip install face_recognition
+```
+
+Then click `Enroll Face`, enter a name, and the current visible face is stored
+in `~/.config/go2_local_brain/faces.json` by default.
 
 Full install from scratch:
 

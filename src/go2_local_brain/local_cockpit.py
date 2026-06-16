@@ -6,20 +6,23 @@ import argparse
 import asyncio
 import io
 import logging
+import os
+from pathlib import Path
 import time
 from typing import Any
 
 from aiohttp import web
 
 from .config import load_config
+from .autonomy.face_id import FaceDatabase, FaceIdentifier, UNKNOWN_LABEL, build_face_embedder
 from .driver.webrtc_client import Go2Config, Go2WebRTCClient
 from .gun_relay import GunRelay, gun_relay_config_from_env
-from .viewer import _jpeg_from_frame
 
 log = logging.getLogger(__name__)
 
-_MOVE_DURATION_S = 0.28
+_MOVE_DURATION_S = 0.20
 _FACE_INTERVAL_S = 0.20
+_DEFAULT_FACE_BACKEND = "face_recognition"
 
 
 class LocalCockpit:
@@ -36,12 +39,15 @@ class LocalCockpit:
         self._video_frames = 0
         self._status = "starting"
         self._last_result = ""
-        self._faces: list[dict[str, float]] = []
+        self._faces: list[dict[str, Any]] = []
         self._video_size = {"width": 0, "height": 0}
         self._face_error = ""
         self._last_face_scan = 0.0
-        self._face_cascade: Any = None
-        self._face_backend = "not-loaded"
+        self._face_backend = os.getenv("GO2_FACE_BACKEND", _DEFAULT_FACE_BACKEND)
+        self._face_identifier: FaceIdentifier | None = None
+        self._face_db_path = Path(os.getenv("GO2_FACE_DB", str(FaceDatabase.default_path()))).expanduser()
+        self._latest_image: Any = None
+        self._battery_percent: float | None = None
 
     async def run(self) -> None:
         cfg = load_config()
@@ -67,8 +73,10 @@ class LocalCockpit:
         app.router.add_post("/api/move", self._move_action)
         app.router.add_post("/api/stop", self._stop_action)
         app.router.add_post("/api/gun/preconnect", self._gun_preconnect)
+        app.router.add_post("/api/gun/test", self._gun_test)
         app.router.add_post("/api/gun/fire", self._gun_fire)
         app.router.add_post("/api/gun/stop", self._gun_stop)
+        app.router.add_post("/api/face/enroll", self._face_enroll)
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -109,11 +117,12 @@ class LocalCockpit:
         while True:
             frame = await track.recv()
             image = frame.to_image()
+            self._latest_image = image.convert("RGB")
             self._video_size = {"width": int(getattr(image, "width", 0)), "height": int(getattr(image, "height", 0))}
             now = time.monotonic()
             if now - self._last_face_scan >= _FACE_INTERVAL_S:
                 self._last_face_scan = now
-                self._faces = self._detect_faces(image)
+                self._faces = self._identify_faces(self._latest_image)
             jpeg = _jpeg_from_image(image)
             async with self._state_changed:
                 self._latest_jpeg = jpeg
@@ -123,41 +132,32 @@ class LocalCockpit:
 
     def _load_face_detector(self) -> None:
         try:
-            import cv2  # type: ignore
-
-            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            cascade = cv2.CascadeClassifier(cascade_path)
-            if cascade.empty():
-                self._face_backend = "opencv-unavailable"
-                self._face_error = "empty cascade"
-                return
-            self._face_cascade = cascade
-            self._face_backend = "opencv-haar"
+            database = FaceDatabase.load_or_empty(self._face_db_path)
+            embedder = build_face_embedder(self._face_backend)
+            self._face_identifier = FaceIdentifier(embedder, database)
         except Exception as exc:  # noqa: BLE001
-            self._face_backend = "opencv-unavailable"
+            self._face_identifier = None
             self._face_error = str(exc)
 
-    def _detect_faces(self, image: Any) -> list[dict[str, float]]:
-        if self._face_cascade is None:
+    def _identify_faces(self, image: Any) -> list[dict[str, Any]]:
+        if self._face_identifier is None:
             return []
         try:
-            import cv2  # type: ignore
-            import numpy as np  # type: ignore
-
-            rgb = np.array(image.convert("RGB"))
-            gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-            faces = self._face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(32, 32))
+            boxes = _face_boxes(image)
+            identified = self._face_identifier.identify_faces(image, boxes)
             width = max(1, int(getattr(image, "width", 1)))
             height = max(1, int(getattr(image, "height", 1)))
             return [
                 {
-                    "x": float(x) / width,
-                    "y": float(y) / height,
-                    "w": float(w) / width,
-                    "h": float(h) / height,
-                    "label": "face",
+                    "x": max(0.0, float(face.x - face.width / 2) / width),
+                    "y": max(0.0, float(face.y - face.height / 2) / height),
+                    "w": min(1.0, float(face.width) / width),
+                    "h": min(1.0, float(face.height) / height),
+                    "label": face.label,
+                    "score": face.score,
+                    "known": face.label != UNKNOWN_LABEL,
                 }
-                for x, y, w, h in faces[:8]
+                for face in identified[:8]
             ]
         except Exception as exc:  # noqa: BLE001
             self._face_error = str(exc)
@@ -207,6 +207,36 @@ class LocalCockpit:
         self._last_result = result
         return web.json_response({"ok": True, "result": result})
 
+    async def _face_enroll(self, request: web.Request) -> web.Response:
+        payload = await _json_or_empty(request)
+        label = str(payload.get("label", "")).strip()
+        index = int(payload.get("index", 0) or 0)
+        if not label:
+            return web.json_response({"ok": False, "result": "face label is required"}, status=400)
+        if self._face_identifier is None:
+            return web.json_response({"ok": False, "result": f"face backend unavailable: {self._face_error}"}, status=400)
+        if self._latest_image is None or not self._faces:
+            return web.json_response({"ok": False, "result": "no face is visible yet"}, status=400)
+        face = self._faces[min(max(index, 0), len(self._faces) - 1)]
+        width = max(1, int(getattr(self._latest_image, "width", 1)))
+        height = max(1, int(getattr(self._latest_image, "height", 1)))
+        box = (
+            int(face["x"] * width),
+            int(face["y"] * height),
+            int((face["x"] + face["w"]) * width),
+            int((face["y"] + face["h"]) * height),
+        )
+        try:
+            ok = self._face_identifier.enroll_from_image(label, self._latest_image, box)
+            if not ok:
+                return web.json_response({"ok": False, "result": "face embedding failed"}, status=400)
+            path = self._face_identifier.database.save(self._face_db_path)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("face enroll failed")
+            return web.json_response({"ok": False, "result": f"face enroll failed: {exc}"}, status=400)
+        self._last_result = f"enrolled face {label}"
+        return web.json_response({"ok": True, "result": f"enrolled {label} -> {path}"})
+
     async def _stop_action(self, _request: web.Request) -> web.Response:
         await self._safe_stop()
         self._last_result = "stop"
@@ -220,6 +250,15 @@ class LocalCockpit:
             return web.json_response({"ok": False, "result": f"gun preconnect failed: {exc}"}, status=400)
         self._last_result = result
         return web.json_response({"ok": True, "result": result})
+
+    async def _gun_test(self, _request: web.Request) -> web.Response:
+        try:
+            result = await self._gun.test()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("gun relay test failed")
+            return web.json_response({"ok": False, "result": f"gun relay test failed: {exc}"}, status=400)
+        self._last_result = f"gun relay test: {result}"
+        return web.json_response({"ok": True, "result": self._last_result})
 
     async def _gun_fire(self, _request: web.Request) -> web.Response:
         try:
@@ -240,6 +279,8 @@ class LocalCockpit:
             await self._client.stop()
 
     def _status_payload(self) -> dict[str, Any]:
+        sport_state = getattr(self._client, "_sport_state", {}) if self._client is not None else {}
+        self._battery_percent = _extract_battery_percent(sport_state)
         return {
             "status": self._status,
             "video_frames": self._video_frames,
@@ -248,7 +289,9 @@ class LocalCockpit:
             "video_size": self._video_size,
             "face_backend": self._face_backend,
             "face_error": self._face_error,
+            "face_db": str(self._face_db_path),
             "gun_active": self._gun.active,
+            "battery_percent": self._battery_percent,
         }
 
 
@@ -256,6 +299,50 @@ def _jpeg_from_image(image: Any) -> bytes:
     with io.BytesIO() as out:
         image.save(out, format="JPEG", quality=80)
         return out.getvalue()
+
+
+def _face_boxes(image: Any) -> list[tuple[int, int, int, int]]:
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("opencv-python-headless is required for live FaceID boxes") from exc
+
+    arr = np.asarray(image.convert("RGB"))
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48))
+    return [(int(x), int(y), int(x + w), int(y + h)) for x, y, w, h in faces]
+
+
+def _extract_battery_percent(sport_state: Any) -> float | None:
+    if not isinstance(sport_state, dict):
+        return None
+    candidates: list[Any] = [
+        sport_state.get("battery_percent"),
+        sport_state.get("battery"),
+        sport_state.get("soc"),
+        sport_state.get("power_percent"),
+    ]
+    for key in ("bms_state", "battery_state", "power_state"):
+        nested = sport_state.get(key)
+        if isinstance(nested, dict):
+            candidates.extend([
+                nested.get("soc"),
+                nested.get("percentage"),
+                nested.get("percent"),
+                nested.get("battery_percent"),
+            ])
+    for value in candidates:
+        try:
+            pct = float(value)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 <= pct <= 1.0:
+            return round(pct * 100.0, 1)
+        if 0.0 <= pct <= 100.0:
+            return round(pct, 1)
+    return None
 
 
 async def _json_or_empty(request: web.Request) -> dict[str, Any]:
@@ -314,12 +401,13 @@ _INDEX_HTML = """<!doctype html>
         <button data-move="left">A</button><button onclick="stopNow()">Stop</button><button data-move="right">D</button>
         <button data-move="turnLeft">Q</button><button data-move="back">S</button><button data-move="turnRight">E</button>
       </div>
-      <label>Speed <input id="speed" type="range" min="0.10" max="0.75" step="0.05" value="0.40"></label>
-      <label>Turn <input id="turn" type="range" min="0.20" max="1.10" step="0.05" value="0.75"></label>
+      <label>Speed <input id="speed" type="range" min="0.10" max="2.00" step="0.05" value="0.65"></label>
+      <label>Turn <input id="turn" type="range" min="0.20" max="2.00" step="0.05" value="0.95"></label>
 
       <h2>USB Trigger</h2>
       <div class="grid2">
         <button class="pre" onclick="gunPreconnect()">SSH Warm</button>
+        <button onclick="gunTest()">Test SSH</button>
         <button onclick="gunStop()">Stop Fire</button>
       </div>
       <button class="fire wide" id="fireBtn">Hold Fire</button>
@@ -327,6 +415,10 @@ _INDEX_HTML = """<!doctype html>
 
       <h2>FaceID</h2>
       <div class="hint" id="faceStatus">waiting</div>
+      <div class="grid2">
+        <button onclick="enrollFace()">Enroll Face</button>
+        <input id="faceName" placeholder="name" autocomplete="off">
+      </div>
     </aside>
     <section class="video" id="videoPanel">
       <img id="video" src="/video.mjpg" alt="Live robot video">
@@ -338,6 +430,8 @@ _INDEX_HTML = """<!doctype html>
     const faceStatus = document.getElementById("faceStatus");
     const active = new Set();
     let tick = null;
+    let current = {vx:0, vy:0, vyaw:0};
+    let latestFaces = [];
 
     function speed() { return Number(document.getElementById("speed").value); }
     function turn() { return Number(document.getElementById("turn").value); }
@@ -352,15 +446,22 @@ _INDEX_HTML = """<!doctype html>
       const s = speed(), t = turn();
       let vx = 0, vy = 0, vyaw = 0;
       if (active.has("forward")) vx += s;
-      if (active.has("back")) vx -= s * 0.75;
-      if (active.has("left")) vy += s * 0.6;
-      if (active.has("right")) vy -= s * 0.6;
+      if (active.has("back")) vx -= s * 0.85;
+      if (active.has("left")) vy += s * 0.75;
+      if (active.has("right")) vy -= s * 0.75;
       if (active.has("turnLeft")) vyaw += t;
       if (active.has("turnRight")) vyaw -= t;
       return {vx, vy, vyaw, duration_s:0.28};
     }
+    function smoothToward(target) {
+      const gain = 0.42;
+      current.vx += (target.vx - current.vx) * gain;
+      current.vy += (target.vy - current.vy) * gain;
+      current.vyaw += (target.vyaw - current.vyaw) * gain;
+      return {vx:current.vx, vy:current.vy, vyaw:current.vyaw, duration_s:0.20};
+    }
     function pulseMove() {
-      const body = vectorFromActive();
+      const body = smoothToward(vectorFromActive());
       if (body.vx || body.vy || body.vyaw) api("/api/move", body).catch(() => {});
     }
     function hold(name) {
@@ -376,6 +477,7 @@ _INDEX_HTML = """<!doctype html>
       active.clear();
       if (tick) clearInterval(tick);
       tick = null;
+      current = {vx:0, vy:0, vyaw:0};
       return api("/api/stop").catch(() => {});
     }
     document.querySelectorAll("[data-move]").forEach((button) => {
@@ -401,8 +503,17 @@ _INDEX_HTML = """<!doctype html>
     });
 
     function gunPreconnect() { return api("/api/gun/preconnect").catch(() => {}); }
+    function gunTest() { return api("/api/gun/test").catch(() => {}); }
     function gunFire() { return api("/api/gun/fire").catch(() => {}); }
     function gunStop() { return api("/api/gun/stop").catch(() => {}); }
+    function enrollFace() {
+      const label = document.getElementById("faceName").value.trim();
+      if (!label) {
+        statusEl.textContent = "enter a face name first";
+        return;
+      }
+      return api("/api/face/enroll", {label, index:0}).catch(() => {});
+    }
     const fireBtn = document.getElementById("fireBtn");
     fireBtn.addEventListener("mousedown", gunFire);
     fireBtn.addEventListener("mouseup", gunStop);
@@ -416,6 +527,7 @@ _INDEX_HTML = """<!doctype html>
       const overlay = document.getElementById("overlay");
       overlay.innerHTML = "";
       const faces = data.faces || [];
+      latestFaces = faces;
       const panelRect = panel.getBoundingClientRect();
       const imgRatio = (data.video_size?.width || 1) / (data.video_size?.height || 1);
       const panelRatio = panelRect.width / Math.max(1, panelRect.height);
@@ -434,15 +546,17 @@ _INDEX_HTML = """<!doctype html>
         box.style.top = `${offY + face.y * drawH}px`;
         box.style.width = `${face.w * drawW}px`;
         box.style.height = `${face.h * drawH}px`;
-        box.innerHTML = "<span>FaceID</span>";
+        const score = typeof face.score === "number" ? ` ${face.score.toFixed(2)}` : "";
+        box.innerHTML = `<span>${face.label || "face"}${score}</span>`;
         overlay.appendChild(box);
       });
-      faceStatus.textContent = `${data.face_backend || "none"} faces=${faces.length}${data.face_error ? " error=" + data.face_error : ""}`;
+      faceStatus.textContent = `${data.face_backend || "none"} faces=${faces.length} db=${data.face_db || ""}${data.face_error ? " error=" + data.face_error : ""}`;
     }
     async function refreshStatus() {
       const res = await fetch("/status.json");
       const data = await res.json();
-      statusEl.textContent = `${data.status} video=${data.video_frames} gun=${data.gun_active ? "active" : "idle"}\\n${data.last_result || ""}`;
+      const battery = data.battery_percent == null ? "unknown" : `${data.battery_percent}%`;
+      statusEl.textContent = `${data.status} video=${data.video_frames} battery=${battery} gun=${data.gun_active ? "active" : "idle"}\\n${data.last_result || ""}`;
       drawFaces(data);
     }
     setInterval(refreshStatus, 400);
