@@ -416,9 +416,10 @@ _INDEX_HTML = """<!doctype html>
       <h2>FaceID</h2>
       <div class="hint" id="faceStatus">waiting</div>
       <div class="grid2">
-        <button onclick="enrollFace()">Enroll Face</button>
-        <input id="faceName" placeholder="name" autocomplete="off">
+        <button onclick="enrollFace()">Add Face To DB</button>
+        <input id="faceName" placeholder="face name" autocomplete="off">
       </div>
+      <div class="hint">Type a name, keep one face visible, then click Add Face To DB.</div>
     </aside>
     <section class="video" id="videoPanel">
       <img id="video" src="/video.mjpg" alt="Live robot video">
@@ -507,7 +508,12 @@ _INDEX_HTML = """<!doctype html>
     function gunFire() { return api("/api/gun/fire").catch(() => {}); }
     function gunStop() { return api("/api/gun/stop").catch(() => {}); }
     function enrollFace() {
-      const label = document.getElementById("faceName").value.trim();
+      const input = document.getElementById("faceName");
+      let label = input.value.trim();
+      if (!label) {
+        label = prompt("Name this face:")?.trim() || "";
+        if (label) input.value = label;
+      }
       if (!label) {
         statusEl.textContent = "enter a face name first";
         return;
