@@ -55,6 +55,42 @@ Three layers, top to bottom:
 
 You need the dog powered on and joined to the same Wi‑Fi as your computer.
 
+For the current lean localhost cockpit with WASD, video, FaceID boxes, and the
+Jetson USB trigger relay:
+
+```bash
+cd ~/robotics/go2_local_brain
+git pull
+source .venv/bin/activate
+./scripts/run_local_cockpit.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:8775
+```
+
+Defaults:
+
+```env
+GO2_IP=192.168.123.161
+GO2_WEBRTC_METHOD=LocalSTA
+GO2_AES_128_KEY=
+FORCE_MOTION_MODE=normal
+GUN_DOG_HOST=192.168.123.121
+GUN_DOG_USER=root
+GUN_JETSON_HOST=10.42.0.1
+GUN_JETSON_USER=root
+GUN_FIRE_COMMAND=cat /dev/ttyUSB0 | xxd
+```
+
+The `Hold Fire` button starts the remote USB command through an SSH jump
+via the dog. Releasing it, pressing `Stop Fire`, or closing the cockpit sends
+Ctrl+C/terminates the command.
+
+Full install from scratch:
+
 ```bash
 # 1. System packages. portaudio19-dev is required because a dependency
 #    (pyaudio) compiles against it on Linux.
