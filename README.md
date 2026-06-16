@@ -80,14 +80,21 @@ GO2_AES_128_KEY=
 FORCE_MOTION_MODE=normal
 GUN_DOG_HOST=192.168.123.121
 GUN_DOG_USER=root
-GUN_JETSON_HOST=10.42.0.1
-GUN_JETSON_USER=root
+GUN_DOG_PASSWORD=
+GUN_JETSON_HOST=10.42.0.2
+GUN_JETSON_USER=unitree
+GUN_JETSON_PASSWORD=
 GUN_FIRE_COMMAND=cat /dev/ttyUSB0 | xxd
+GUN_STOP_COMMAND=printf '\x30' > /dev/ttyUSB0
 ```
 
 The `Hold Fire` button starts the remote USB command through an SSH jump
 via the dog. Releasing it, pressing `Stop Fire`, or closing the cockpit sends
 Ctrl+C/terminates the command.
+
+If you use passwords instead of SSH keys, install `sshpass` in the WSL instance
+and set `GUN_DOG_PASSWORD` and `GUN_JETSON_PASSWORD` in your local `.env`.
+Do not commit those password values.
 
 Full install from scratch:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import signal
 import tempfile
 from dataclasses import dataclass
@@ -14,9 +15,12 @@ from pathlib import Path
 class GunRelayConfig:
     dog_host: str = "192.168.123.121"
     dog_user: str = "root"
-    jetson_host: str = "10.42.0.1"
-    jetson_user: str = "root"
+    dog_password: str | None = None
+    jetson_host: str = "10.42.0.2"
+    jetson_user: str = "unitree"
+    jetson_password: str | None = None
     command: str = "cat /dev/ttyUSB0 | xxd"
+    stop_command: str = "printf '\\x30' > /dev/ttyUSB0"
     connect_timeout_s: int = 4
     control_persist_s: int = 60
 
@@ -80,30 +84,46 @@ class GunRelay:
         async with self._lock:
             proc = self._proc
             self._proc = None
+            messages: list[str] = []
             if proc is None:
-                return "fire already stopped"
-            if proc.returncode is None:
-                if proc.stdin is not None:
+                messages.append("fire already stopped")
+            else:
+                if proc.returncode is None:
+                    if proc.stdin is not None:
+                        try:
+                            proc.stdin.write(b"\x03")
+                            await proc.stdin.drain()
+                        except Exception:
+                            pass
+                    await asyncio.sleep(0.25)
+                if proc.returncode is None:
                     try:
-                        proc.stdin.write(b"\x03")
-                        await proc.stdin.drain()
-                    except Exception:
+                        if os.name == "posix":
+                            os.kill(proc.pid, signal.SIGINT)
+                        else:
+                            proc.terminate()
+                    except ProcessLookupError:
                         pass
-                await asyncio.sleep(0.25)
-            if proc.returncode is None:
                 try:
-                    if os.name == "posix":
-                        os.kill(proc.pid, signal.SIGINT)
-                    else:
-                        proc.terminate()
-                except ProcessLookupError:
-                    pass
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-            return "fire stopped"
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                messages.append("fire process stopped")
+
+            if self._cfg.stop_command:
+                args = self._ssh_base_args(control_master=False) + [self._target(), self._cfg.stop_command]
+                stop_proc = await asyncio.create_subprocess_exec(
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await stop_proc.communicate()
+                if stop_proc.returncode != 0:
+                    detail = (stderr or stdout).decode(errors="replace").strip()
+                    raise RuntimeError(f"USB stop command failed: {detail or stop_proc.returncode}")
+                messages.append("USB stop byte sent")
+            return "; ".join(messages)
 
     async def close(self) -> None:
         await self.stop()
@@ -121,6 +141,39 @@ class GunRelay:
         return f"{self._cfg.jetson_user}@{self._cfg.jetson_host}"
 
     def _ssh_base_args(self, *, control_master: bool) -> list[str]:
+        if self._cfg.dog_password and self._cfg.jetson_password:
+            proxy_command = " ".join(
+                [
+                    "sshpass",
+                    "-p",
+                    shlex.quote(self._cfg.dog_password),
+                    "ssh",
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
+                    "-o",
+                    f"ConnectTimeout={self._cfg.connect_timeout_s}",
+                    "-W",
+                    "%h:%p",
+                    f"{self._cfg.dog_user}@{self._cfg.dog_host}",
+                ]
+            )
+            return [
+                "sshpass",
+                "-p",
+                self._cfg.jetson_password,
+                "ssh",
+                "-o",
+                f"ConnectTimeout={self._cfg.connect_timeout_s}",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                f"ProxyCommand={proxy_command}",
+                "-o",
+                f"ControlPath={self._control_path}",
+                "-o",
+                "ControlMaster=auto",
+            ]
+
         args = [
             "ssh",
             "-o",
@@ -143,9 +196,13 @@ def gun_relay_config_from_env() -> GunRelayConfig:
     return GunRelayConfig(
         dog_host=os.getenv("GUN_DOG_HOST", "192.168.123.121").strip() or "192.168.123.121",
         dog_user=os.getenv("GUN_DOG_USER", "root").strip() or "root",
-        jetson_host=os.getenv("GUN_JETSON_HOST", "10.42.0.1").strip() or "10.42.0.1",
-        jetson_user=os.getenv("GUN_JETSON_USER", "root").strip() or "root",
+        dog_password=os.getenv("GUN_DOG_PASSWORD", "").strip() or None,
+        jetson_host=os.getenv("GUN_JETSON_HOST", "10.42.0.2").strip() or "10.42.0.2",
+        jetson_user=os.getenv("GUN_JETSON_USER", "unitree").strip() or "unitree",
+        jetson_password=os.getenv("GUN_JETSON_PASSWORD", "").strip() or None,
         command=os.getenv("GUN_FIRE_COMMAND", "cat /dev/ttyUSB0 | xxd").strip() or "cat /dev/ttyUSB0 | xxd",
+        stop_command=os.getenv("GUN_STOP_COMMAND", "printf '\\x30' > /dev/ttyUSB0").strip()
+        or "printf '\\x30' > /dev/ttyUSB0",
         connect_timeout_s=max(1, int(os.getenv("GUN_SSH_CONNECT_TIMEOUT_S", "4"))),
         control_persist_s=max(5, int(os.getenv("GUN_SSH_CONTROL_PERSIST_S", "60"))),
     )
