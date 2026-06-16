@@ -291,6 +291,8 @@ docs/                    deeper guides (see below)
 
 ### Deeper docs
 
+- [docs/module_reference.md](docs/module_reference.md) — **how every module
+  works and gets called**, with end-to-end call chains.
 - [docs/how_it_works.md](docs/how_it_works.md) — the WebRTC + driver internals.
 - [docs/faces_workflows_targeting.md](docs/faces_workflows_targeting.md) —
   face recognition, workflows, and the Nerf relay design.
