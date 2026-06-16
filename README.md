@@ -93,6 +93,11 @@ The `Hold Fire` button starts the remote USB command through an SSH jump
 via the dog. Releasing it, pressing `Stop Fire`, or closing the cockpit sends
 Ctrl+C/terminates the command.
 
+The local cockpit uses operator-speed movement caps: up to `2.0 m/s` forward,
+`1.0 m/s` strafe, and `2.5 rad/s` yaw, with browser-side smoothing so blended
+WASD/QE turns ramp instead of snapping. Press `Space` or the `Jump` button for
+the firmware jump action.
+
 If you use passwords instead of SSH keys, install `sshpass` in the WSL instance
 and set `GUN_DOG_PASSWORD` and `GUN_JETSON_PASSWORD` in your local `.env`.
 Do not commit those password values.

@@ -20,7 +20,7 @@ from .gun_relay import GunRelay, gun_relay_config_from_env
 
 log = logging.getLogger(__name__)
 
-_MOVE_DURATION_S = 0.20
+_MOVE_DURATION_S = 0.16
 _FACE_INTERVAL_S = 0.20
 _DEFAULT_FACE_BACKEND = "face_recognition"
 
@@ -72,6 +72,7 @@ class LocalCockpit:
         app.router.add_get("/status.json", self._status_json)
         app.router.add_post("/api/move", self._move_action)
         app.router.add_post("/api/stop", self._stop_action)
+        app.router.add_post("/api/jump", self._jump_action)
         app.router.add_post("/api/gun/preconnect", self._gun_preconnect)
         app.router.add_post("/api/gun/test", self._gun_test)
         app.router.add_post("/api/gun/fire", self._gun_fire)
@@ -242,6 +243,18 @@ class LocalCockpit:
         self._last_result = "stop"
         return web.json_response({"ok": True, "result": "stop"})
 
+    async def _jump_action(self, _request: web.Request) -> web.Response:
+        if self._client is None:
+            return web.json_response({"ok": False, "result": "robot is not connected"}, status=503)
+        try:
+            await self._client.advanced_action("jump")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("jump failed")
+            await self._safe_stop()
+            return web.json_response({"ok": False, "result": f"jump failed: {exc}"}, status=400)
+        self._last_result = "jump"
+        return web.json_response({"ok": True, "result": "jump"})
+
     async def _gun_preconnect(self, _request: web.Request) -> web.Response:
         try:
             result = await self._gun.preconnect()
@@ -401,8 +414,10 @@ _INDEX_HTML = """<!doctype html>
         <button data-move="left">A</button><button onclick="stopNow()">Stop</button><button data-move="right">D</button>
         <button data-move="turnLeft">Q</button><button data-move="back">S</button><button data-move="turnRight">E</button>
       </div>
-      <label>Speed <input id="speed" type="range" min="0.10" max="2.00" step="0.05" value="0.65"></label>
-      <label>Turn <input id="turn" type="range" min="0.20" max="2.00" step="0.05" value="0.95"></label>
+      <button class="wide" onclick="jumpNow()">Jump</button>
+      <label>Speed <input id="speed" type="range" min="0.10" max="2.00" step="0.05" value="1.00"></label>
+      <label>Turn <input id="turn" type="range" min="0.20" max="2.50" step="0.05" value="1.25"></label>
+      <div class="hint">Space = jump. Hold W/A/S/D/Q/E for smooth blended movement.</div>
 
       <h2>USB Trigger</h2>
       <div class="grid2">
@@ -452,14 +467,14 @@ _INDEX_HTML = """<!doctype html>
       if (active.has("right")) vy -= s * 0.75;
       if (active.has("turnLeft")) vyaw += t;
       if (active.has("turnRight")) vyaw -= t;
-      return {vx, vy, vyaw, duration_s:0.28};
+      return {vx, vy, vyaw, duration_s:0.16};
     }
     function smoothToward(target) {
-      const gain = 0.42;
+      const gain = 0.28;
       current.vx += (target.vx - current.vx) * gain;
       current.vy += (target.vy - current.vy) * gain;
       current.vyaw += (target.vyaw - current.vyaw) * gain;
-      return {vx:current.vx, vy:current.vy, vyaw:current.vyaw, duration_s:0.20};
+      return {vx:current.vx, vy:current.vy, vyaw:current.vyaw, duration_s:0.16};
     }
     function pulseMove() {
       const body = smoothToward(vectorFromActive());
@@ -468,7 +483,7 @@ _INDEX_HTML = """<!doctype html>
     function hold(name) {
       active.add(name);
       pulseMove();
-      if (!tick) tick = setInterval(pulseMove, 210);
+      if (!tick) tick = setInterval(pulseMove, 115);
     }
     function release(name) {
       active.delete(name);
@@ -489,8 +504,17 @@ _INDEX_HTML = """<!doctype html>
       button.addEventListener("touchstart", (e) => { e.preventDefault(); hold(name); });
       button.addEventListener("touchend", (e) => { e.preventDefault(); release(name); });
     });
+    function jumpNow() {
+      stopNow();
+      return api("/api/jump").catch(() => {});
+    }
     const keyMap = {w:"forward", s:"back", a:"left", d:"right", q:"turnLeft", e:"turnRight"};
     document.addEventListener("keydown", (e) => {
+      if (e.code === "Space" && !e.repeat) {
+        e.preventDefault();
+        jumpNow();
+        return;
+      }
       const name = keyMap[e.key.toLowerCase()];
       if (!name || active.has(name)) return;
       e.preventDefault();

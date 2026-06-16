@@ -7,14 +7,15 @@ snappier walking, strafing, and turning while keeping short command windows.
 
 from __future__ import annotations
 
-# Forward speed (m/s) - Bumped from 0.75 for a faster stride
-MAX_VX = 1.20
+# Forward speed (m/s). Operator mode: allow the full fast-walk range tested
+# through the localhost cockpit while keeping the deadman stop active.
+MAX_VX = 2.00
 
-# Lateral / strafe speed (m/s) - Bumped from 0.40
-MAX_VY = 0.65
+# Lateral / strafe speed (m/s).
+MAX_VY = 1.00
 
-# Yaw rate (rad/s) - Bumped from 1.10 for snappier turns
-MAX_VYAW = 1.60
+# Yaw rate (rad/s).
+MAX_VYAW = 2.50
 
 # Default duration of a single move command, in seconds - Raised from 0.45
 DEFAULT_MOVE_DURATION_S = 1.00
