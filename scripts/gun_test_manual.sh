@@ -39,9 +39,8 @@ expect {
   eof { puts stderr "jetson ssh exited"; exit 1 }
 }
 expect -re {[$#] $}
-send -- "sudo chmod 666 /dev/ttyUSB0\r"
+send -- "printf '%s\\n' '$env(GUN_JETSON_SUDO_PASSWORD)' | sudo -S chmod 666 /dev/ttyUSB0\r"
 expect {
-  -re "(?i)password.*:" { send -- "$env(GUN_JETSON_SUDO_PASSWORD)\r"; exp_continue }
   -re "(?i)sorry" { puts stderr "sudo rejected the Jetson password"; exit 1 }
   -re {[$#] $} {}
   timeout { puts stderr "USB chmod did not return"; exit 124 }

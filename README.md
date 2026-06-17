@@ -84,28 +84,31 @@ GUN_DOG_PASSWORD=
 GUN_JETSON_HOST=10.42.0.2
 GUN_JETSON_USER=unitree
 GUN_JETSON_PASSWORD=
-GUN_JETSON_SUDO_PASSWORD=123
+GUN_JETSON_SUDO_PASSWORD=
+GUN_SESSION_SCRIPT=scripts/gun_session_manual.sh
 GUN_FIRE_SCRIPT=scripts/gun_fire_manual.sh
 GUN_STOP_SCRIPT=scripts/gun_stop_manual.sh
 GUN_TEST_SCRIPT=scripts/gun_test_manual.sh
-GUN_FIRE_COMMAND="sudo bash -lc 'cat /dev/ttyUSB0 | xxd'"
-GUN_STOP_COMMAND="sudo bash -lc 'printf \"\\x30\" > /dev/ttyUSB0'"
+GUN_FIRE_COMMAND="cat /dev/ttyUSB0 | xxd"
+GUN_STOP_COMMAND="printf '\\x30' > /dev/ttyUSB0"
 GO2_FACE_BACKEND=face_recognition
 ```
 
-The `Hold Fire` button starts `scripts/gun_fire_manual.sh`. Releasing it,
-pressing `Stop Fire`, closing the cockpit, or releasing Xbox right trigger
-terminates the fire script and then runs `scripts/gun_stop_manual.sh`.
+The cockpit opens one persistent SSH session with `scripts/gun_session_manual.sh`.
+`Start Fire` sends the start command into that session. `Stop Fire` sends
+Ctrl+C, chmods USB, then writes the stop byte. Releasing the mouse button or
+Xbox trigger does not stop firing.
 
 The local cockpit uses operator-speed movement caps: up to `2.0 m/s` forward,
 `1.0 m/s` strafe, and `2.5 rad/s` yaw, with browser-side smoothing so blended
 WASD/QE turns ramp instead of snapping. Press `Space`, Xbox `A`, or the `Jump`
 button for the firmware jump action. Xbox sticks also drive the dog: left stick
-moves, right stick turns, right trigger holds fire, and `B` stops.
+moves, right stick turns, right trigger starts fire, and `B` stops fire.
 
 Install `expect` in the WSL instance, then set `GUN_DOG_PASSWORD` and
 `GUN_JETSON_PASSWORD` in your local `.env`. If sudo prompts separately on the
-Jetson, set `GUN_JETSON_SUDO_PASSWORD=123`. Do not commit those password values.
+Jetson, set `GUN_JETSON_SUDO_PASSWORD` in your private `.env`. Do not commit
+those password values.
 
 ```bash
 sudo apt install -y expect
@@ -117,12 +120,11 @@ The gun buttons use this path:
 computer -> ssh root@192.168.123.121 -> ssh unitree@10.42.0.2
 ```
 
-`Test Script` runs `scripts/gun_test_manual.sh`, runs
-`sudo chmod 666 /dev/ttyUSB0` on the Jetson, and expects `relay-ok`.
-`Hold Fire` runs the same permission command before
-`sudo bash -lc 'cat /dev/ttyUSB0 | xxd'`. `Stop Fire` sends Ctrl+C first,
-runs `sudo chmod 666 /dev/ttyUSB0`, then runs
-`sudo bash -lc 'printf "\x30" > /dev/ttyUSB0'`.
+`Test Script` runs `scripts/gun_test_manual.sh`, pipes
+`GUN_JETSON_SUDO_PASSWORD` into `sudo -S chmod 666 /dev/ttyUSB0` on the Jetson,
+and expects `relay-ok`. `Start Fire` runs the same permission command before
+`cat /dev/ttyUSB0 | xxd`. `Stop Fire` sends Ctrl+C first, runs the same chmod,
+then runs `printf '\x30' > /dev/ttyUSB0`.
 
 FaceID enrollment requires a face embedding backend. For CPU use:
 

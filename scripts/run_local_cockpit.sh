@@ -44,11 +44,18 @@ export GUN_JETSON_HOST="${GUN_JETSON_HOST:-10.42.0.2}"
 export GUN_JETSON_USER="${GUN_JETSON_USER:-unitree}"
 export GUN_JETSON_PASSWORD="${GUN_JETSON_PASSWORD:-}"
 export GUN_JETSON_SUDO_PASSWORD="${GUN_JETSON_SUDO_PASSWORD:-$GUN_JETSON_PASSWORD}"
+export GUN_SESSION_SCRIPT="${GUN_SESSION_SCRIPT:-scripts/gun_session_manual.sh}"
 export GUN_FIRE_SCRIPT="${GUN_FIRE_SCRIPT:-scripts/gun_fire_manual.sh}"
 export GUN_STOP_SCRIPT="${GUN_STOP_SCRIPT:-scripts/gun_stop_manual.sh}"
 export GUN_TEST_SCRIPT="${GUN_TEST_SCRIPT:-scripts/gun_test_manual.sh}"
-export GUN_FIRE_COMMAND="${GUN_FIRE_COMMAND:-sudo bash -lc 'cat /dev/ttyUSB0 | xxd'}"
-export GUN_STOP_COMMAND="${GUN_STOP_COMMAND:-sudo bash -lc 'printf \"\\x30\" > /dev/ttyUSB0'}"
+if [[ "${GUN_FIRE_COMMAND:-}" == "sudo bash -lc 'cat /dev/ttyUSB0 | xxd'" ]]; then
+  GUN_FIRE_COMMAND="cat /dev/ttyUSB0 | xxd"
+fi
+if [[ "${GUN_STOP_COMMAND:-}" == "sudo bash -lc 'printf \"\\x30\" > /dev/ttyUSB0'" ]]; then
+  GUN_STOP_COMMAND="printf '\\x30' > /dev/ttyUSB0"
+fi
+export GUN_FIRE_COMMAND="${GUN_FIRE_COMMAND:-cat /dev/ttyUSB0 | xxd}"
+export GUN_STOP_COMMAND="${GUN_STOP_COMMAND:-printf '\\x30' > /dev/ttyUSB0}"
 export GO2_FACE_BACKEND="${GO2_FACE_BACKEND:-face_recognition}"
 
 exec python -m go2_local_brain.local_cockpit --host "${GO2_GUI_HOST:-127.0.0.1}" --port "${GO2_GUI_PORT:-8775}"

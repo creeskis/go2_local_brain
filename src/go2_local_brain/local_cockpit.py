@@ -428,9 +428,9 @@ _INDEX_HTML = """<!doctype html>
         <button class="pre" onclick="gunPreconnect()">Script Mode</button>
         <button onclick="gunTest()">Test Script</button>
         <button onclick="gunStop()">Stop Fire</button>
+        <button class="fire" onclick="gunFire()">Start Fire</button>
       </div>
-      <button class="fire wide" id="fireBtn">Hold Fire</button>
-      <div class="hint">Hold Fire runs scripts/gun_fire_manual.sh. Release, Stop Fire, or Xbox RT release runs the stop script.</div>
+      <div class="hint">Start Fire keeps the Jetson SSH session open and starts the USB command. Stop Fire sends Ctrl+C, chmods USB, then writes the stop byte.</div>
 
       <h2>FaceID</h2>
       <div class="hint" id="faceStatus">waiting</div>
@@ -555,13 +555,6 @@ _INDEX_HTML = """<!doctype html>
       }
       return api("/api/face/enroll", {label, index:0}).catch(() => {});
     }
-    const fireBtn = document.getElementById("fireBtn");
-    fireBtn.addEventListener("mousedown", gunFire);
-    fireBtn.addEventListener("mouseup", gunStop);
-    fireBtn.addEventListener("mouseleave", gunStop);
-    fireBtn.addEventListener("touchstart", (e) => { e.preventDefault(); gunFire(); });
-    fireBtn.addEventListener("touchend", (e) => { e.preventDefault(); gunStop(); });
-
     function deadzone(value, zone = 0.18) {
       return Math.abs(value) < zone ? 0 : value;
     }
@@ -592,7 +585,6 @@ _INDEX_HTML = """<!doctype html>
 
       const rt = Boolean(pad.buttons[7]?.pressed);
       if (rt && !gamepadFireDown) gunFire();
-      if (!rt && gamepadFireDown) gunStop();
       gamepadFireDown = rt;
 
       const a = Boolean(pad.buttons[0]?.pressed);
