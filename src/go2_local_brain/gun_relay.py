@@ -110,7 +110,13 @@ class GunRelay:
         if proc is None or proc.stdin is None:
             raise RuntimeError("gun SSH session is not open")
         proc.stdin.write(f"{command}\n".encode())
-        await proc.stdin.drain()
+        try:
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            detail = await self._session_error()
+            self._session = None
+            self._active = False
+            raise RuntimeError(f"gun SSH session closed before {command}: {detail}") from None
         return await self._read_until(expected, timeout=20.0)
 
     async def _read_until(self, expected: str, *, timeout: float) -> str:
