@@ -87,8 +87,8 @@ GUN_JETSON_PASSWORD=
 GUN_FIRE_SCRIPT=scripts/gun_fire_manual.sh
 GUN_STOP_SCRIPT=scripts/gun_stop_manual.sh
 GUN_TEST_SCRIPT=scripts/gun_test_manual.sh
-GUN_FIRE_COMMAND=cat /dev/ttyUSB0 | xxd
-GUN_STOP_COMMAND=printf '\x30' > /dev/ttyUSB0
+GUN_FIRE_COMMAND="cat /dev/ttyUSB0 | xxd"
+GUN_STOP_COMMAND="printf '\\x30' > /dev/ttyUSB0"
 GO2_FACE_BACKEND=face_recognition
 ```
 
