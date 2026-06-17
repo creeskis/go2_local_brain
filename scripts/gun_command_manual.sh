@@ -26,10 +26,10 @@ CHMOD_USB="printf '%s\n' $SUDO_PASS_Q | sudo -S chmod 666 /dev/ttyUSB0"
 
 case "$GUN_ACTION" in
   START)
-    REMOTE_COMMAND="$CHMOD_USB && nohup bash -lc $FIRE_COMMAND_Q >/tmp/go2_gun_fire.log 2>&1 & echo \$! > /tmp/go2_gun_fire.pid && echo OK START"
+    REMOTE_COMMAND="if [ -f /tmp/go2_gun_fire.pid ] && kill -0 \$(cat /tmp/go2_gun_fire.pid) 2>/dev/null; then echo OK START already-active; else rm -f /tmp/go2_gun_fire.pid; $CHMOD_USB && setsid bash -lc $FIRE_COMMAND_Q >/tmp/go2_gun_fire.log 2>&1 & pid=\$!; echo \$pid > /tmp/go2_gun_fire.pid; echo OK START pid=\$pid; fi"
     ;;
   STOP)
-    REMOTE_COMMAND="if [ -f /tmp/go2_gun_fire.pid ]; then kill -INT \$(cat /tmp/go2_gun_fire.pid) 2>/dev/null || true; rm -f /tmp/go2_gun_fire.pid; fi; pkill -INT -f 'cat /dev/ttyUSB0' 2>/dev/null || true; $CHMOD_USB && bash -lc $STOP_COMMAND_Q && echo OK STOP"
+    REMOTE_COMMAND="if [ -f /tmp/go2_gun_fire.pid ]; then pid=\$(cat /tmp/go2_gun_fire.pid); kill -INT -\$pid 2>/dev/null || kill -INT \$pid 2>/dev/null || true; sleep 0.2; kill -TERM -\$pid 2>/dev/null || kill -TERM \$pid 2>/dev/null || true; rm -f /tmp/go2_gun_fire.pid; fi; $CHMOD_USB && bash -lc $STOP_COMMAND_Q && echo OK STOP"
     ;;
   TEST)
     REMOTE_COMMAND="$CHMOD_USB && echo OK TEST"

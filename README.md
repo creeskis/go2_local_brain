@@ -88,7 +88,6 @@ GUN_JETSON_SUDO_PASSWORD=
 GUN_LOCAL_SSH_PORT=10022
 GUN_TUNNEL_SCRIPT=scripts/gun_tunnel_manual.sh
 GUN_COMMAND_SCRIPT=scripts/gun_command_manual.sh
-GUN_SESSION_SCRIPT=scripts/gun_session_manual.sh
 GUN_FIRE_SCRIPT=scripts/gun_fire_manual.sh
 GUN_STOP_SCRIPT=scripts/gun_stop_manual.sh
 GUN_TEST_SCRIPT=scripts/gun_test_manual.sh
@@ -126,8 +125,8 @@ computer -> ssh root@192.168.123.121 -> ssh unitree@10.42.0.2
 `Test Script` opens the tunnel, pipes `GUN_JETSON_SUDO_PASSWORD` into
 `sudo -S chmod 666 /dev/ttyUSB0` on the Jetson, and expects `OK TEST`.
 `Start Fire` runs the same permission command before starting
-`cat /dev/ttyUSB0 | xxd` in the background on the Jetson. `Stop Fire` kills that
-background command, runs the same chmod, then runs
+`cat /dev/ttyUSB0 | xxd` in its own process group on the Jetson. `Stop Fire`
+kills only that saved process group, runs the same chmod, then runs
 `printf '\x30' > /dev/ttyUSB0`.
 
 FaceID enrollment requires a face embedding backend. For CPU use:

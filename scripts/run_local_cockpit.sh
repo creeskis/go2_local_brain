@@ -47,7 +47,6 @@ export GUN_JETSON_SUDO_PASSWORD="${GUN_JETSON_SUDO_PASSWORD:-$GUN_JETSON_PASSWOR
 export GUN_LOCAL_SSH_PORT="${GUN_LOCAL_SSH_PORT:-10022}"
 export GUN_TUNNEL_SCRIPT="${GUN_TUNNEL_SCRIPT:-scripts/gun_tunnel_manual.sh}"
 export GUN_COMMAND_SCRIPT="${GUN_COMMAND_SCRIPT:-scripts/gun_command_manual.sh}"
-export GUN_SESSION_SCRIPT="${GUN_SESSION_SCRIPT:-scripts/gun_session_manual.sh}"
 export GUN_FIRE_SCRIPT="${GUN_FIRE_SCRIPT:-scripts/gun_fire_manual.sh}"
 export GUN_STOP_SCRIPT="${GUN_STOP_SCRIPT:-scripts/gun_stop_manual.sh}"
 export GUN_TEST_SCRIPT="${GUN_TEST_SCRIPT:-scripts/gun_test_manual.sh}"

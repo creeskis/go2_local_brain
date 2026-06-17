@@ -133,7 +133,8 @@ class GunRelay:
         out = stdout.decode(errors="replace").strip()
         err = stderr.decode(errors="replace").strip()
         if proc.returncode != 0:
-            raise RuntimeError(err or out or f"{script.name} exited {proc.returncode}")
+            detail = "; ".join(part for part in (err, out, f"exit {proc.returncode}") if part)
+            raise RuntimeError(detail)
         return out or f"OK {action}"
 
     async def _tunnel_error(self) -> str:
