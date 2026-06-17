@@ -85,6 +85,9 @@ GUN_JETSON_HOST=10.42.0.2
 GUN_JETSON_USER=unitree
 GUN_JETSON_PASSWORD=
 GUN_JETSON_SUDO_PASSWORD=
+GUN_LOCAL_SSH_PORT=10022
+GUN_TUNNEL_SCRIPT=scripts/gun_tunnel_manual.sh
+GUN_COMMAND_SCRIPT=scripts/gun_command_manual.sh
 GUN_SESSION_SCRIPT=scripts/gun_session_manual.sh
 GUN_FIRE_SCRIPT=scripts/gun_fire_manual.sh
 GUN_STOP_SCRIPT=scripts/gun_stop_manual.sh
@@ -94,10 +97,10 @@ GUN_STOP_COMMAND="printf '\\x30' > /dev/ttyUSB0"
 GO2_FACE_BACKEND=face_recognition
 ```
 
-The cockpit opens one persistent SSH session with `scripts/gun_session_manual.sh`.
-`Start Fire` sends the start command into that session. `Stop Fire` sends
-Ctrl+C, chmods USB, then writes the stop byte. Releasing the mouse button or
-Xbox trigger does not stop firing.
+The cockpit keeps an SSH tunnel to the dog open with `scripts/gun_tunnel_manual.sh`.
+`Start Fire` and `Stop Fire` run short Jetson commands through that tunnel with
+`scripts/gun_command_manual.sh`. Releasing the mouse button or Xbox trigger
+does not stop firing.
 
 The local cockpit uses operator-speed movement caps: up to `2.0 m/s` forward,
 `1.0 m/s` strafe, and `2.5 rad/s` yaw, with browser-side smoothing so blended
@@ -120,11 +123,12 @@ The gun buttons use this path:
 computer -> ssh root@192.168.123.121 -> ssh unitree@10.42.0.2
 ```
 
-`Test Script` runs `scripts/gun_test_manual.sh`, pipes
-`GUN_JETSON_SUDO_PASSWORD` into `sudo -S chmod 666 /dev/ttyUSB0` on the Jetson,
-and expects `relay-ok`. `Start Fire` runs the same permission command before
-`cat /dev/ttyUSB0 | xxd`. `Stop Fire` sends Ctrl+C first, runs the same chmod,
-then runs `printf '\x30' > /dev/ttyUSB0`.
+`Test Script` opens the tunnel, pipes `GUN_JETSON_SUDO_PASSWORD` into
+`sudo -S chmod 666 /dev/ttyUSB0` on the Jetson, and expects `OK TEST`.
+`Start Fire` runs the same permission command before starting
+`cat /dev/ttyUSB0 | xxd` in the background on the Jetson. `Stop Fire` kills that
+background command, runs the same chmod, then runs
+`printf '\x30' > /dev/ttyUSB0`.
 
 FaceID enrollment requires a face embedding backend. For CPU use:
 

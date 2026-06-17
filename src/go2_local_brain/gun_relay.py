@@ -1,4 +1,4 @@
-"""Script-backed USB trigger relay."""
+"""Persistent dog SSH tunnel for the Jetson USB trigger."""
 
 from __future__ import annotations
 
@@ -10,10 +10,8 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class GunRelayConfig:
-    session_script: str = "scripts/gun_session_manual.sh"
-    fire_script: str = "scripts/gun_fire_manual.sh"
-    stop_script: str = "scripts/gun_stop_manual.sh"
-    test_script: str = "scripts/gun_test_manual.sh"
+    tunnel_script: str = "scripts/gun_tunnel_manual.sh"
+    command_script: str = "scripts/gun_command_manual.sh"
     dog_host: str = "192.168.123.121"
     dog_user: str = "root"
     dog_password: str | None = None
@@ -21,17 +19,18 @@ class GunRelayConfig:
     jetson_user: str = "unitree"
     jetson_password: str | None = None
     jetson_sudo_password: str | None = None
+    local_ssh_port: int = 10022
     fire_command: str = "cat /dev/ttyUSB0 | xxd"
     stop_command: str = "printf '\\x30' > /dev/ttyUSB0"
 
 
 class GunRelay:
-    """Run the operator-provided fire/stop scripts from the cockpit."""
+    """Keep a dog SSH tunnel open and run short Jetson trigger commands."""
 
     def __init__(self, cfg: GunRelayConfig) -> None:
         self._cfg = cfg
         self._repo_root = Path(__file__).resolve().parents[2]
-        self._session: asyncio.subprocess.Process | None = None
+        self._tunnel: asyncio.subprocess.Process | None = None
         self._active = False
         self._lock = asyncio.Lock()
 
@@ -40,57 +39,52 @@ class GunRelay:
         return self._active
 
     async def preconnect(self) -> str:
-        await self._ensure_session()
-        return "gun SSH session ready"
+        await self._ensure_tunnel()
+        return "gun SSH tunnel ready"
 
     async def test(self) -> str:
         async with self._lock:
-            await self._ensure_session_locked()
-            return await self._send_session_command("TEST", "OK TEST")
+            await self._ensure_tunnel_locked()
+            return await self._run_command("TEST")
 
     async def fire(self) -> str:
         async with self._lock:
-            await self._ensure_session_locked()
-            result = await self._send_session_command("START", "OK START")
+            await self._ensure_tunnel_locked()
+            result = await self._run_command("START")
             self._active = True
             return result
 
     async def stop(self) -> str:
         async with self._lock:
-            await self._ensure_session_locked()
-            result = await self._send_session_command("STOP", "OK STOP")
+            await self._ensure_tunnel_locked()
+            result = await self._run_command("STOP")
             self._active = False
             return result
 
     async def close(self) -> None:
         async with self._lock:
-            proc = self._session
+            proc = self._tunnel
             self._active = False
             if proc is None or proc.returncode is not None:
-                self._session = None
+                self._tunnel = None
                 return
+            proc.terminate()
             try:
-                await self._send_session_command("EXIT", "OK EXIT")
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except Exception:  # noqa: BLE001
-                proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-            finally:
-                self._session = None
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+            self._tunnel = None
 
-    async def _ensure_session(self) -> None:
+    async def _ensure_tunnel(self) -> None:
         async with self._lock:
-            await self._ensure_session_locked()
+            await self._ensure_tunnel_locked()
 
-    async def _ensure_session_locked(self) -> None:
-        if self._session is not None and self._session.returncode is None:
+    async def _ensure_tunnel_locked(self) -> None:
+        if self._tunnel is not None and self._tunnel.returncode is None:
             return
-        script = self._resolve_script(self._cfg.session_script)
-        self._session = await asyncio.create_subprocess_exec(
+        script = self._resolve_script(self._cfg.tunnel_script)
+        self._tunnel = await asyncio.create_subprocess_exec(
             str(script),
             cwd=str(self._repo_root),
             env=self._env(),
@@ -100,53 +94,54 @@ class GunRelay:
             start_new_session=(os.name == "posix"),
         )
         try:
-            await self._read_until("READY", timeout=20.0)
+            await self._read_tunnel_ready(timeout=20.0)
         except Exception:
-            detail = await self._session_error()
-            raise RuntimeError(f"gun SSH session failed to start: {detail}") from None
+            detail = await self._tunnel_error()
+            raise RuntimeError(f"gun SSH tunnel failed to start: {detail}") from None
 
-    async def _send_session_command(self, command: str, expected: str) -> str:
-        proc = self._session
-        if proc is None or proc.stdin is None:
-            raise RuntimeError("gun SSH session is not open")
-        proc.stdin.write(f"{command}\n".encode())
-        try:
-            await proc.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError):
-            detail = await self._session_error()
-            self._session = None
-            self._active = False
-            raise RuntimeError(f"gun SSH session closed before {command}: {detail}") from None
-        return await self._read_until(expected, timeout=20.0)
-
-    async def _read_until(self, expected: str, *, timeout: float) -> str:
-        proc = self._session
+    async def _read_tunnel_ready(self, *, timeout: float) -> str:
+        proc = self._tunnel
         if proc is None or proc.stdout is None:
-            raise RuntimeError("gun SSH session is not open")
-        lines: list[str] = []
+            raise RuntimeError("gun SSH tunnel is not open")
         while True:
             try:
                 raw = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
             except asyncio.TimeoutError:
-                detail = await self._session_error()
-                raise RuntimeError(f"timeout waiting for {expected}: {detail}") from None
+                detail = await self._tunnel_error()
+                raise RuntimeError(f"timeout waiting for tunnel: {detail}") from None
             if not raw:
-                detail = await self._session_error()
-                raise RuntimeError(f"gun SSH session exited while waiting for {expected}: {detail}")
+                detail = await self._tunnel_error()
+                raise RuntimeError(f"gun SSH tunnel exited while starting: {detail}")
             line = raw.decode(errors="replace").strip()
-            if line:
-                lines.append(line)
             if line.startswith("ERR "):
                 raise RuntimeError(line[4:])
-            if line.startswith(expected):
+            if line.startswith("READY"):
                 return line
 
-    async def _session_error(self) -> str:
-        proc = self._session
+    async def _run_command(self, action: str) -> str:
+        script = self._resolve_script(self._cfg.command_script)
+        env = self._env()
+        env["GUN_ACTION"] = action
+        proc = await asyncio.create_subprocess_exec(
+            str(script),
+            cwd=str(self._repo_root),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        out = stdout.decode(errors="replace").strip()
+        err = stderr.decode(errors="replace").strip()
+        if proc.returncode != 0:
+            raise RuntimeError(err or out or f"{script.name} exited {proc.returncode}")
+        return out or f"OK {action}"
+
+    async def _tunnel_error(self) -> str:
+        proc = self._tunnel
         if proc is None or proc.stderr is None:
             return "no stderr"
         if proc.returncode is None:
-            return "session still running"
+            return "tunnel still running"
         stderr = await proc.stderr.read()
         return stderr.decode(errors="replace").strip() or f"exit {proc.returncode}"
 
@@ -182,6 +177,7 @@ class GunRelay:
                 "GUN_DOG_USER": self._cfg.dog_user,
                 "GUN_JETSON_HOST": self._cfg.jetson_host,
                 "GUN_JETSON_USER": self._cfg.jetson_user,
+                "GUN_LOCAL_SSH_PORT": str(self._cfg.local_ssh_port),
                 "GUN_FIRE_COMMAND": self._cfg.fire_command,
                 "GUN_STOP_COMMAND": self._cfg.stop_command,
             }
@@ -197,14 +193,10 @@ class GunRelay:
 
 def gun_relay_config_from_env() -> GunRelayConfig:
     return GunRelayConfig(
-        session_script=os.getenv("GUN_SESSION_SCRIPT", "scripts/gun_session_manual.sh").strip()
-        or "scripts/gun_session_manual.sh",
-        fire_script=os.getenv("GUN_FIRE_SCRIPT", "scripts/gun_fire_manual.sh").strip()
-        or "scripts/gun_fire_manual.sh",
-        stop_script=os.getenv("GUN_STOP_SCRIPT", "scripts/gun_stop_manual.sh").strip()
-        or "scripts/gun_stop_manual.sh",
-        test_script=os.getenv("GUN_TEST_SCRIPT", "scripts/gun_test_manual.sh").strip()
-        or "scripts/gun_test_manual.sh",
+        tunnel_script=os.getenv("GUN_TUNNEL_SCRIPT", "scripts/gun_tunnel_manual.sh").strip()
+        or "scripts/gun_tunnel_manual.sh",
+        command_script=os.getenv("GUN_COMMAND_SCRIPT", "scripts/gun_command_manual.sh").strip()
+        or "scripts/gun_command_manual.sh",
         dog_host=os.getenv("GUN_DOG_HOST", "192.168.123.121").strip() or "192.168.123.121",
         dog_user=os.getenv("GUN_DOG_USER", "root").strip() or "root",
         dog_password=os.getenv("GUN_DOG_PASSWORD", "").strip() or None,
@@ -214,6 +206,7 @@ def gun_relay_config_from_env() -> GunRelayConfig:
         jetson_sudo_password=os.getenv("GUN_JETSON_SUDO_PASSWORD", "").strip()
         or os.getenv("GUN_JETSON_PASSWORD", "").strip()
         or None,
+        local_ssh_port=max(1, int(os.getenv("GUN_LOCAL_SSH_PORT", "10022"))),
         fire_command=os.getenv("GUN_FIRE_COMMAND", "cat /dev/ttyUSB0 | xxd").strip()
         or "cat /dev/ttyUSB0 | xxd",
         stop_command=os.getenv("GUN_STOP_COMMAND", "printf '\\x30' > /dev/ttyUSB0").strip()
