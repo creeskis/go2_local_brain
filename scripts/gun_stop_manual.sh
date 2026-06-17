@@ -12,6 +12,7 @@ need expect
 
 : "${GUN_DOG_PASSWORD:?set GUN_DOG_PASSWORD in .env}"
 : "${GUN_JETSON_PASSWORD:?set GUN_JETSON_PASSWORD in .env}"
+export GUN_JETSON_SUDO_PASSWORD="${GUN_JETSON_SUDO_PASSWORD:-$GUN_JETSON_PASSWORD}"
 
 export GUN_DOG_HOST="${GUN_DOG_HOST:-192.168.123.121}"
 export GUN_DOG_USER="${GUN_DOG_USER:-root}"
@@ -51,9 +52,17 @@ expect {
 
 send -- "\003"
 after 300
+send -- "sudo chmod 666 /dev/ttyUSB0\r"
+expect {
+  -re "(?i)password.*:" { send -- "$env(GUN_JETSON_SUDO_PASSWORD)\r"; exp_continue }
+  -re "(?i)sorry" { puts stderr "sudo rejected the Jetson password"; exit 1 }
+  -re {[$#] $} {}
+  timeout { puts stderr "USB chmod did not return"; exit 124 }
+  eof { puts stderr "jetson ssh exited during USB chmod"; exit 1 }
+}
 send -- "$env(GUN_STOP_COMMAND)\r"
 expect {
-  -re "(?i)password.*:" { send -- "$env(GUN_JETSON_PASSWORD)\r"; exp_continue }
+  -re "(?i)password.*:" { send -- "$env(GUN_JETSON_SUDO_PASSWORD)\r"; exp_continue }
   -re "(?i)sorry" { puts stderr "sudo rejected the Jetson password"; exit 1 }
   -re {[$#] $} {}
   timeout { puts stderr "stop command did not return"; exit 124 }

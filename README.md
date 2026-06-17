@@ -84,6 +84,7 @@ GUN_DOG_PASSWORD=
 GUN_JETSON_HOST=10.42.0.2
 GUN_JETSON_USER=unitree
 GUN_JETSON_PASSWORD=
+GUN_JETSON_SUDO_PASSWORD=123
 GUN_FIRE_SCRIPT=scripts/gun_fire_manual.sh
 GUN_STOP_SCRIPT=scripts/gun_stop_manual.sh
 GUN_TEST_SCRIPT=scripts/gun_test_manual.sh
@@ -103,7 +104,8 @@ button for the firmware jump action. Xbox sticks also drive the dog: left stick
 moves, right stick turns, right trigger holds fire, and `B` stops.
 
 Install `expect` in the WSL instance, then set `GUN_DOG_PASSWORD` and
-`GUN_JETSON_PASSWORD` in your local `.env`. Do not commit those password values.
+`GUN_JETSON_PASSWORD` in your local `.env`. If sudo prompts separately on the
+Jetson, set `GUN_JETSON_SUDO_PASSWORD=123`. Do not commit those password values.
 
 ```bash
 sudo apt install -y expect
@@ -115,10 +117,12 @@ The gun buttons use this path:
 computer -> ssh root@192.168.123.121 -> ssh unitree@10.42.0.2
 ```
 
-`Test Script` runs `scripts/gun_test_manual.sh` and expects `relay-ok` from the
-Jetson. `Hold Fire` runs the same command that worked manually:
+`Test Script` runs `scripts/gun_test_manual.sh`, runs
+`sudo chmod 666 /dev/ttyUSB0` on the Jetson, and expects `relay-ok`.
+`Hold Fire` runs the same permission command before
 `sudo bash -lc 'cat /dev/ttyUSB0 | xxd'`. `Stop Fire` sends Ctrl+C first,
-then runs `sudo bash -lc 'printf "\x30" > /dev/ttyUSB0'`.
+runs `sudo chmod 666 /dev/ttyUSB0`, then runs
+`sudo bash -lc 'printf "\x30" > /dev/ttyUSB0'`.
 
 FaceID enrollment requires a face embedding backend. For CPU use:
 
