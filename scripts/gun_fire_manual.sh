@@ -17,7 +17,7 @@ export GUN_DOG_HOST="${GUN_DOG_HOST:-192.168.123.121}"
 export GUN_DOG_USER="${GUN_DOG_USER:-root}"
 export GUN_JETSON_HOST="${GUN_JETSON_HOST:-10.42.0.2}"
 export GUN_JETSON_USER="${GUN_JETSON_USER:-unitree}"
-export GUN_FIRE_COMMAND="${GUN_FIRE_COMMAND:-cat /dev/ttyUSB0 | xxd}"
+export GUN_FIRE_COMMAND="${GUN_FIRE_COMMAND:-sudo bash -lc 'cat /dev/ttyUSB0 | xxd'}"
 
 exec expect <<'EXPECT'
 set timeout 12
@@ -51,5 +51,18 @@ expect {
 
 set timeout -1
 send -- "$env(GUN_FIRE_COMMAND)\r"
+set timeout 12
+expect {
+  -re "(?i)password.*:" { send -- "$env(GUN_JETSON_PASSWORD)\r"; exp_continue }
+  -re "(?i)sorry" { puts stderr "sudo rejected the Jetson password"; exit 1 }
+  timeout {}
+  eof { puts stderr "fire command exited before interact"; exit 1 }
+}
+trap {
+  send -- "\003"
+  after 400
+  exit 130
+} SIGINT
+set timeout -1
 interact
 EXPECT

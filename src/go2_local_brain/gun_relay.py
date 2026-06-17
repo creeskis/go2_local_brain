@@ -20,8 +20,8 @@ class GunRelayConfig:
     jetson_host: str = "10.42.0.2"
     jetson_user: str = "unitree"
     jetson_password: str | None = None
-    fire_command: str = "cat /dev/ttyUSB0 | xxd"
-    stop_command: str = "printf '\\x30' > /dev/ttyUSB0"
+    fire_command: str = "sudo bash -lc 'cat /dev/ttyUSB0 | xxd'"
+    stop_command: str = "sudo bash -lc 'printf \"\\x30\" > /dev/ttyUSB0'"
 
 
 class GunRelay:
@@ -153,8 +153,8 @@ def gun_relay_config_from_env() -> GunRelayConfig:
         jetson_host=os.getenv("GUN_JETSON_HOST", "10.42.0.2").strip() or "10.42.0.2",
         jetson_user=os.getenv("GUN_JETSON_USER", "unitree").strip() or "unitree",
         jetson_password=os.getenv("GUN_JETSON_PASSWORD", "").strip() or None,
-        fire_command=os.getenv("GUN_FIRE_COMMAND", "cat /dev/ttyUSB0 | xxd").strip()
-        or "cat /dev/ttyUSB0 | xxd",
-        stop_command=os.getenv("GUN_STOP_COMMAND", "printf '\\x30' > /dev/ttyUSB0").strip()
-        or "printf '\\x30' > /dev/ttyUSB0",
+        fire_command=os.getenv("GUN_FIRE_COMMAND", "sudo bash -lc 'cat /dev/ttyUSB0 | xxd'").strip()
+        or "sudo bash -lc 'cat /dev/ttyUSB0 | xxd'",
+        stop_command=os.getenv("GUN_STOP_COMMAND", "sudo bash -lc 'printf \"\\x30\" > /dev/ttyUSB0'").strip()
+        or "sudo bash -lc 'printf \"\\x30\" > /dev/ttyUSB0'",
     )

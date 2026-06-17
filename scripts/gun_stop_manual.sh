@@ -17,7 +17,7 @@ export GUN_DOG_HOST="${GUN_DOG_HOST:-192.168.123.121}"
 export GUN_DOG_USER="${GUN_DOG_USER:-root}"
 export GUN_JETSON_HOST="${GUN_JETSON_HOST:-10.42.0.2}"
 export GUN_JETSON_USER="${GUN_JETSON_USER:-unitree}"
-export GUN_STOP_COMMAND="${GUN_STOP_COMMAND:-printf '\\x30' > /dev/ttyUSB0}"
+export GUN_STOP_COMMAND="${GUN_STOP_COMMAND:-sudo bash -lc 'printf \"\\x30\" > /dev/ttyUSB0'}"
 
 exec expect <<'EXPECT'
 set timeout 12
@@ -49,8 +49,12 @@ expect {
   eof { puts stderr "jetson ssh exited before shell"; exit 1 }
 }
 
+send -- "\003"
+after 300
 send -- "$env(GUN_STOP_COMMAND)\r"
 expect {
+  -re "(?i)password.*:" { send -- "$env(GUN_JETSON_PASSWORD)\r"; exp_continue }
+  -re "(?i)sorry" { puts stderr "sudo rejected the Jetson password"; exit 1 }
   -re {[$#] $} {}
   timeout { puts stderr "stop command did not return"; exit 124 }
   eof {}

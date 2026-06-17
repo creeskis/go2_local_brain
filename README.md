@@ -87,8 +87,8 @@ GUN_JETSON_PASSWORD=
 GUN_FIRE_SCRIPT=scripts/gun_fire_manual.sh
 GUN_STOP_SCRIPT=scripts/gun_stop_manual.sh
 GUN_TEST_SCRIPT=scripts/gun_test_manual.sh
-GUN_FIRE_COMMAND="cat /dev/ttyUSB0 | xxd"
-GUN_STOP_COMMAND="printf '\\x30' > /dev/ttyUSB0"
+GUN_FIRE_COMMAND="sudo bash -lc 'cat /dev/ttyUSB0 | xxd'"
+GUN_STOP_COMMAND="sudo bash -lc 'printf \"\\x30\" > /dev/ttyUSB0'"
 GO2_FACE_BACKEND=face_recognition
 ```
 
@@ -117,7 +117,8 @@ computer -> ssh root@192.168.123.121 -> ssh unitree@10.42.0.2
 
 `Test Script` runs `scripts/gun_test_manual.sh` and expects `relay-ok` from the
 Jetson. `Hold Fire` runs the same command that worked manually:
-`cat /dev/ttyUSB0 | xxd`. `Stop Fire` runs `printf '\x30' > /dev/ttyUSB0`.
+`sudo bash -lc 'cat /dev/ttyUSB0 | xxd'`. `Stop Fire` sends Ctrl+C first,
+then runs `sudo bash -lc 'printf "\x30" > /dev/ttyUSB0'`.
 
 FaceID enrollment requires a face embedding backend. For CPU use:
 
