@@ -1,221 +1,160 @@
-"""SSH-jump relay for a USB trigger attached to the Jetson."""
+"""Script-backed USB trigger relay."""
 
 from __future__ import annotations
 
 import asyncio
 import os
-import shlex
 import signal
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 
 @dataclass(frozen=True)
 class GunRelayConfig:
+    fire_script: str = "scripts/gun_fire_manual.sh"
+    stop_script: str = "scripts/gun_stop_manual.sh"
+    test_script: str = "scripts/gun_test_manual.sh"
     dog_host: str = "192.168.123.121"
     dog_user: str = "root"
     dog_password: str | None = None
     jetson_host: str = "10.42.0.2"
     jetson_user: str = "unitree"
     jetson_password: str | None = None
-    command: str = "cat /dev/ttyUSB0 | xxd"
+    fire_command: str = "cat /dev/ttyUSB0 | xxd"
     stop_command: str = "printf '\\x30' > /dev/ttyUSB0"
-    connect_timeout_s: int = 4
-    control_persist_s: int = 60
 
 
 class GunRelay:
-    """Start/stop the remote USB trigger command through the dog SSH jump."""
+    """Run the operator-provided fire/stop scripts from the cockpit."""
 
     def __init__(self, cfg: GunRelayConfig) -> None:
         self._cfg = cfg
+        self._repo_root = Path(__file__).resolve().parents[2]
         self._proc: asyncio.subprocess.Process | None = None
-        self._master_proc: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()
-        socket_name = f"go2-gun-{cfg.dog_host.replace('.', '_')}-{cfg.jetson_host.replace('.', '_')}.sock"
-        self._control_path = str(Path(tempfile.gettempdir()) / socket_name)
 
     @property
     def active(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
 
     async def preconnect(self) -> str:
-        """Open an SSH control connection so later fire commands start faster."""
-        if self._master_proc is not None and self._master_proc.returncode is None:
-            return "ssh control socket already warming"
-        args = self._ssh_base_args(control_master=True) + ["-N", self._target()]
-        self._master_proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            _stdout, stderr = await asyncio.wait_for(self._master_proc.communicate(), timeout=1.5)
-        except asyncio.TimeoutError:
-            return "ssh control socket warming"
-        if self._master_proc.returncode == 0:
-            return "ssh control socket ready"
-        detail = stderr.decode(errors="replace").strip()
-        return f"ssh preconnect exited: {detail or self._master_proc.returncode}"
+        return "script mode: no SSH warmup"
+
+    async def test(self) -> str:
+        return await self._run_to_completion(self._cfg.test_script)
 
     async def fire(self) -> str:
         async with self._lock:
             if self.active:
                 return "fire already active"
-            args = self._ssh_base_args(control_master=False) + ["-tt", self._target(), self._cfg.command]
+            script = self._resolve_script(self._cfg.fire_script)
             self._proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdin=asyncio.subprocess.PIPE,
+                str(script),
+                cwd=str(self._repo_root),
+                env=self._env(),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
             )
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.35)
             if self._proc.returncode is not None:
                 stderr = b""
                 if self._proc.stderr is not None:
                     stderr = await self._proc.stderr.read()
                 self._proc = None
                 detail = stderr.decode(errors="replace").strip()
-                raise RuntimeError(f"fire command exited immediately: {detail or 'no stderr'}")
-            return "fire active"
-
-    async def test(self) -> str:
-        args = self._ssh_base_args(control_master=False) + [self._target(), "printf relay-ok"]
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            detail = (stderr or stdout).decode(errors="replace").strip()
-            raise RuntimeError(detail or f"ssh exited {proc.returncode}")
-        return stdout.decode(errors="replace").strip() or "relay-ok"
+                raise RuntimeError(f"fire script exited immediately: {detail or 'no stderr'}")
+            return f"fire script active: {script}"
 
     async def stop(self) -> str:
         async with self._lock:
+            messages: list[str] = []
             proc = self._proc
             self._proc = None
-            messages: list[str] = []
-            if proc is None:
-                messages.append("fire already stopped")
+            if proc is not None and proc.returncode is None:
+                await self._terminate_fire_process(proc)
+                messages.append("fire script stopped")
             else:
-                if proc.returncode is None:
-                    if proc.stdin is not None:
-                        try:
-                            proc.stdin.write(b"\x03")
-                            await proc.stdin.drain()
-                        except Exception:
-                            pass
-                    await asyncio.sleep(0.25)
-                if proc.returncode is None:
-                    try:
-                        if os.name == "posix":
-                            os.kill(proc.pid, signal.SIGINT)
-                        else:
-                            proc.terminate()
-                    except ProcessLookupError:
-                        pass
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-                messages.append("fire process stopped")
-
-            if self._cfg.stop_command:
-                args = self._ssh_base_args(control_master=False) + [self._target(), self._cfg.stop_command]
-                stop_proc = await asyncio.create_subprocess_exec(
-                    *args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await stop_proc.communicate()
-                if stop_proc.returncode != 0:
-                    detail = (stderr or stdout).decode(errors="replace").strip()
-                    raise RuntimeError(f"USB stop command failed: {detail or stop_proc.returncode}")
-                messages.append("USB stop byte sent")
+                messages.append("fire already stopped")
+            messages.append(await self._run_to_completion(self._cfg.stop_script))
             return "; ".join(messages)
 
     async def close(self) -> None:
         await self.stop()
-        proc = self._master_proc
-        self._master_proc = None
-        if proc is not None and proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=1.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
 
-    def _target(self) -> str:
-        return f"{self._cfg.jetson_user}@{self._cfg.jetson_host}"
+    async def _terminate_fire_process(self, proc: asyncio.subprocess.Process) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGINT)
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
 
-    def _ssh_base_args(self, *, control_master: bool) -> list[str]:
-        if self._cfg.dog_password and self._cfg.jetson_password:
-            proxy_command = " ".join(
-                [
-                    "sshpass",
-                    "-p",
-                    shlex.quote(self._cfg.dog_password),
-                    "ssh",
-                    "-o",
-                    "StrictHostKeyChecking=accept-new",
-                    "-o",
-                    f"ConnectTimeout={self._cfg.connect_timeout_s}",
-                    "-W",
-                    "%h:%p",
-                    f"{self._cfg.dog_user}@{self._cfg.dog_host}",
-                ]
-            )
-            return [
-                "sshpass",
-                "-p",
-                self._cfg.jetson_password,
-                "ssh",
-                "-o",
-                f"ConnectTimeout={self._cfg.connect_timeout_s}",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                f"ProxyCommand={proxy_command}",
-                "-o",
-                f"ControlPath={self._control_path}",
-                "-o",
-                "ControlMaster=auto",
-            ]
+    async def _run_to_completion(self, script_name: str) -> str:
+        script = self._resolve_script(script_name)
+        proc = await asyncio.create_subprocess_exec(
+            str(script),
+            cwd=str(self._repo_root),
+            env=self._env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        out = stdout.decode(errors="replace").strip()
+        err = stderr.decode(errors="replace").strip()
+        if proc.returncode != 0:
+            raise RuntimeError(err or out or f"{script} exited {proc.returncode}")
+        return out or f"{script.name} ok"
 
-        args = [
-            "ssh",
-            "-o",
-            f"ConnectTimeout={self._cfg.connect_timeout_s}",
-            "-o",
-            "StrictHostKeyChecking=accept-new",
-            "-o",
-            f"ProxyJump={self._cfg.dog_user}@{self._cfg.dog_host}",
-            "-o",
-            f"ControlPath={self._control_path}",
-        ]
-        if control_master:
-            args.extend(["-o", "ControlMaster=auto", "-o", f"ControlPersist={self._cfg.control_persist_s}s"])
-        else:
-            args.extend(["-o", "ControlMaster=auto"])
-        return args
+    def _resolve_script(self, script_name: str) -> Path:
+        script = Path(script_name).expanduser()
+        if not script.is_absolute():
+            script = self._repo_root / script
+        if not script.exists():
+            raise RuntimeError(f"gun script not found: {script}")
+        return script
+
+    def _env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "GUN_DOG_HOST": self._cfg.dog_host,
+                "GUN_DOG_USER": self._cfg.dog_user,
+                "GUN_JETSON_HOST": self._cfg.jetson_host,
+                "GUN_JETSON_USER": self._cfg.jetson_user,
+                "GUN_FIRE_COMMAND": self._cfg.fire_command,
+                "GUN_STOP_COMMAND": self._cfg.stop_command,
+            }
+        )
+        if self._cfg.dog_password:
+            env["GUN_DOG_PASSWORD"] = self._cfg.dog_password
+        if self._cfg.jetson_password:
+            env["GUN_JETSON_PASSWORD"] = self._cfg.jetson_password
+        return env
 
 
 def gun_relay_config_from_env() -> GunRelayConfig:
     return GunRelayConfig(
+        fire_script=os.getenv("GUN_FIRE_SCRIPT", "scripts/gun_fire_manual.sh").strip()
+        or "scripts/gun_fire_manual.sh",
+        stop_script=os.getenv("GUN_STOP_SCRIPT", "scripts/gun_stop_manual.sh").strip()
+        or "scripts/gun_stop_manual.sh",
+        test_script=os.getenv("GUN_TEST_SCRIPT", "scripts/gun_test_manual.sh").strip()
+        or "scripts/gun_test_manual.sh",
         dog_host=os.getenv("GUN_DOG_HOST", "192.168.123.121").strip() or "192.168.123.121",
         dog_user=os.getenv("GUN_DOG_USER", "root").strip() or "root",
         dog_password=os.getenv("GUN_DOG_PASSWORD", "").strip() or None,
         jetson_host=os.getenv("GUN_JETSON_HOST", "10.42.0.2").strip() or "10.42.0.2",
         jetson_user=os.getenv("GUN_JETSON_USER", "unitree").strip() or "unitree",
         jetson_password=os.getenv("GUN_JETSON_PASSWORD", "").strip() or None,
-        command=os.getenv("GUN_FIRE_COMMAND", "cat /dev/ttyUSB0 | xxd").strip() or "cat /dev/ttyUSB0 | xxd",
+        fire_command=os.getenv("GUN_FIRE_COMMAND", "cat /dev/ttyUSB0 | xxd").strip()
+        or "cat /dev/ttyUSB0 | xxd",
         stop_command=os.getenv("GUN_STOP_COMMAND", "printf '\\x30' > /dev/ttyUSB0").strip()
         or "printf '\\x30' > /dev/ttyUSB0",
-        connect_timeout_s=max(1, int(os.getenv("GUN_SSH_CONNECT_TIMEOUT_S", "4"))),
-        control_persist_s=max(5, int(os.getenv("GUN_SSH_CONTROL_PERSIST_S", "60"))),
     )

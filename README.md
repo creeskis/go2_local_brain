@@ -84,26 +84,29 @@ GUN_DOG_PASSWORD=
 GUN_JETSON_HOST=10.42.0.2
 GUN_JETSON_USER=unitree
 GUN_JETSON_PASSWORD=
+GUN_FIRE_SCRIPT=scripts/gun_fire_manual.sh
+GUN_STOP_SCRIPT=scripts/gun_stop_manual.sh
+GUN_TEST_SCRIPT=scripts/gun_test_manual.sh
 GUN_FIRE_COMMAND=cat /dev/ttyUSB0 | xxd
 GUN_STOP_COMMAND=printf '\x30' > /dev/ttyUSB0
 GO2_FACE_BACKEND=face_recognition
 ```
 
-The `Hold Fire` button starts the remote USB command through an SSH jump
-via the dog. Releasing it, pressing `Stop Fire`, or closing the cockpit sends
-Ctrl+C/terminates the command.
+The `Hold Fire` button starts `scripts/gun_fire_manual.sh`. Releasing it,
+pressing `Stop Fire`, closing the cockpit, or releasing Xbox right trigger
+terminates the fire script and then runs `scripts/gun_stop_manual.sh`.
 
 The local cockpit uses operator-speed movement caps: up to `2.0 m/s` forward,
 `1.0 m/s` strafe, and `2.5 rad/s` yaw, with browser-side smoothing so blended
-WASD/QE turns ramp instead of snapping. Press `Space` or the `Jump` button for
-the firmware jump action.
+WASD/QE turns ramp instead of snapping. Press `Space`, Xbox `A`, or the `Jump`
+button for the firmware jump action. Xbox sticks also drive the dog: left stick
+moves, right stick turns, right trigger holds fire, and `B` stops.
 
-If you use passwords instead of SSH keys, install `sshpass` in the WSL instance
-and set `GUN_DOG_PASSWORD` and `GUN_JETSON_PASSWORD` in your local `.env`.
-Do not commit those password values.
+Install `expect` in the WSL instance, then set `GUN_DOG_PASSWORD` and
+`GUN_JETSON_PASSWORD` in your local `.env`. Do not commit those password values.
 
 ```bash
-sudo apt install -y sshpass
+sudo apt install -y expect
 ```
 
 The gun buttons use this path:
@@ -112,9 +115,9 @@ The gun buttons use this path:
 computer -> ssh root@192.168.123.121 -> ssh unitree@10.42.0.2
 ```
 
-`Test SSH` runs `printf relay-ok` on the Jetson. `Hold Fire` starts
-`cat /dev/ttyUSB0 | xxd`. `Stop Fire` sends Ctrl+C and then runs
-`printf '\x30' > /dev/ttyUSB0`.
+`Test Script` runs `scripts/gun_test_manual.sh` and expects `relay-ok` from the
+Jetson. `Hold Fire` runs the same command that worked manually:
+`cat /dev/ttyUSB0 | xxd`. `Stop Fire` runs `printf '\x30' > /dev/ttyUSB0`.
 
 FaceID enrollment requires a face embedding backend. For CPU use:
 

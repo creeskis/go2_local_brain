@@ -283,7 +283,11 @@ class LocalCockpit:
         return web.json_response({"ok": True, "result": result})
 
     async def _gun_stop(self, _request: web.Request) -> web.Response:
-        result = await self._gun.stop()
+        try:
+            result = await self._gun.stop()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("gun stop failed")
+            return web.json_response({"ok": False, "result": f"gun stop failed: {exc}"}, status=400)
         self._last_result = result
         return web.json_response({"ok": True, "result": result})
 
@@ -421,12 +425,12 @@ _INDEX_HTML = """<!doctype html>
 
       <h2>USB Trigger</h2>
       <div class="grid2">
-        <button class="pre" onclick="gunPreconnect()">SSH Warm</button>
-        <button onclick="gunTest()">Test SSH</button>
+        <button class="pre" onclick="gunPreconnect()">Script Mode</button>
+        <button onclick="gunTest()">Test Script</button>
         <button onclick="gunStop()">Stop Fire</button>
       </div>
       <button class="fire wide" id="fireBtn">Hold Fire</button>
-      <div class="hint">Fire starts the remote USB command through the dog SSH jump. Release or Stop Fire sends Ctrl+C/terminates it.</div>
+      <div class="hint">Hold Fire runs scripts/gun_fire_manual.sh. Release, Stop Fire, or Xbox RT release runs the stop script.</div>
 
       <h2>FaceID</h2>
       <div class="hint" id="faceStatus">waiting</div>
@@ -447,6 +451,10 @@ _INDEX_HTML = """<!doctype html>
     const active = new Set();
     let tick = null;
     let current = {vx:0, vy:0, vyaw:0};
+    let gamepad = {vx:0, vy:0, vyaw:0, active:false};
+    let gamepadFireDown = false;
+    let gamepadJumpDown = false;
+    let gamepadStopDown = false;
     let latestFaces = [];
 
     function speed() { return Number(document.getElementById("speed").value); }
@@ -467,6 +475,9 @@ _INDEX_HTML = """<!doctype html>
       if (active.has("right")) vy -= s * 0.75;
       if (active.has("turnLeft")) vyaw += t;
       if (active.has("turnRight")) vyaw -= t;
+      vx += gamepad.vx;
+      vy += gamepad.vy;
+      vyaw += gamepad.vyaw;
       return {vx, vy, vyaw, duration_s:0.16};
     }
     function smoothToward(target) {
@@ -487,7 +498,7 @@ _INDEX_HTML = """<!doctype html>
     }
     function release(name) {
       active.delete(name);
-      if (active.size === 0) stopNow();
+      if (active.size === 0 && !gamepad.active) stopNow();
     }
     function stopNow() {
       active.clear();
@@ -550,6 +561,54 @@ _INDEX_HTML = """<!doctype html>
     fireBtn.addEventListener("mouseleave", gunStop);
     fireBtn.addEventListener("touchstart", (e) => { e.preventDefault(); gunFire(); });
     fireBtn.addEventListener("touchend", (e) => { e.preventDefault(); gunStop(); });
+
+    function deadzone(value, zone = 0.18) {
+      return Math.abs(value) < zone ? 0 : value;
+    }
+    function pollGamepad() {
+      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      const pad = Array.from(pads).find(Boolean);
+      if (!pad) {
+        if (gamepad.active) {
+          gamepad = {vx:0, vy:0, vyaw:0, active:false};
+          stopNow();
+        }
+        requestAnimationFrame(pollGamepad);
+        return;
+      }
+
+      const s = speed();
+      const t = turn();
+      const lx = deadzone(pad.axes[0] || 0);
+      const ly = deadzone(pad.axes[1] || 0);
+      const rx = deadzone(pad.axes[2] || 0);
+      gamepad = {
+        vx: -ly * s,
+        vy: -lx * s * 0.75,
+        vyaw: -rx * t,
+        active: Boolean(lx || ly || rx),
+      };
+      if (gamepad.active) pulseMove();
+
+      const rt = Boolean(pad.buttons[7]?.pressed);
+      if (rt && !gamepadFireDown) gunFire();
+      if (!rt && gamepadFireDown) gunStop();
+      gamepadFireDown = rt;
+
+      const a = Boolean(pad.buttons[0]?.pressed);
+      if (a && !gamepadJumpDown) jumpNow();
+      gamepadJumpDown = a;
+
+      const b = Boolean(pad.buttons[1]?.pressed);
+      if (b && !gamepadStopDown) stopNow();
+      gamepadStopDown = b;
+
+      requestAnimationFrame(pollGamepad);
+    }
+    window.addEventListener("gamepadconnected", (event) => {
+      statusEl.textContent = `gamepad connected: ${event.gamepad.id}`;
+    });
+    pollGamepad();
 
     function drawFaces(data) {
       const panel = document.getElementById("videoPanel");
