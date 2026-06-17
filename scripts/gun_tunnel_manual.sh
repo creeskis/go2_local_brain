@@ -16,6 +16,9 @@ export GUN_DOG_HOST="${GUN_DOG_HOST:-192.168.123.121}"
 export GUN_DOG_USER="${GUN_DOG_USER:-root}"
 export GUN_JETSON_HOST="${GUN_JETSON_HOST:-10.42.0.2}"
 export GUN_LOCAL_SSH_PORT="${GUN_LOCAL_SSH_PORT:-10022}"
+export GUN_LOG_FILE="${GUN_LOG_FILE:-/tmp/go2_gun_relay.log}"
+
+printf '%s [TUNNEL] starting dog=%s jetson=%s local_port=%s\n' "$(date -Is)" "$GUN_DOG_HOST" "$GUN_JETSON_HOST" "$GUN_LOCAL_SSH_PORT" >> "$GUN_LOG_FILE"
 
 exec expect <<'EXPECT'
 set timeout 15

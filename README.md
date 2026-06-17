@@ -86,6 +86,8 @@ GUN_JETSON_USER=unitree
 GUN_JETSON_PASSWORD=
 GUN_JETSON_SUDO_PASSWORD=
 GUN_LOCAL_SSH_PORT=10022
+GUN_LOG_FILE=/tmp/go2_gun_relay.log
+GUN_REMOTE_LOG_FILE=/tmp/go2_gun_remote.log
 GUN_TUNNEL_SCRIPT=scripts/gun_tunnel_manual.sh
 GUN_COMMAND_SCRIPT=scripts/gun_command_manual.sh
 GUN_FIRE_SCRIPT=scripts/gun_fire_manual.sh
@@ -128,6 +130,15 @@ computer -> ssh root@192.168.123.121 -> ssh unitree@10.42.0.2
 `cat /dev/ttyUSB0 | xxd` in its own process group on the Jetson. `Stop Fire`
 kills only that saved process group, runs the same chmod, then runs
 `printf '\x30' > /dev/ttyUSB0`.
+
+For gun relay diagnostics, keep this running in another WSL terminal:
+
+```bash
+tail -f /tmp/go2_gun_relay.log
+```
+
+The Jetson-side command log is written through the tunnel to
+`/tmp/go2_gun_remote.log`.
 
 FaceID enrollment requires a face embedding backend. For CPU use:
 

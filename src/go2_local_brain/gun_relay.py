@@ -20,6 +20,8 @@ class GunRelayConfig:
     jetson_password: str | None = None
     jetson_sudo_password: str | None = None
     local_ssh_port: int = 10022
+    log_file: str = "/tmp/go2_gun_relay.log"
+    remote_log_file: str = "/tmp/go2_gun_remote.log"
     fire_command: str = "cat /dev/ttyUSB0 | xxd"
     stop_command: str = "printf '\\x30' > /dev/ttyUSB0"
 
@@ -179,6 +181,8 @@ class GunRelay:
                 "GUN_JETSON_HOST": self._cfg.jetson_host,
                 "GUN_JETSON_USER": self._cfg.jetson_user,
                 "GUN_LOCAL_SSH_PORT": str(self._cfg.local_ssh_port),
+                "GUN_LOG_FILE": self._cfg.log_file,
+                "GUN_REMOTE_LOG_FILE": self._cfg.remote_log_file,
                 "GUN_FIRE_COMMAND": self._cfg.fire_command,
                 "GUN_STOP_COMMAND": self._cfg.stop_command,
             }
@@ -208,6 +212,9 @@ def gun_relay_config_from_env() -> GunRelayConfig:
         or os.getenv("GUN_JETSON_PASSWORD", "").strip()
         or None,
         local_ssh_port=max(1, int(os.getenv("GUN_LOCAL_SSH_PORT", "10022"))),
+        log_file=os.getenv("GUN_LOG_FILE", "/tmp/go2_gun_relay.log").strip() or "/tmp/go2_gun_relay.log",
+        remote_log_file=os.getenv("GUN_REMOTE_LOG_FILE", "/tmp/go2_gun_remote.log").strip()
+        or "/tmp/go2_gun_remote.log",
         fire_command=os.getenv("GUN_FIRE_COMMAND", "cat /dev/ttyUSB0 | xxd").strip()
         or "cat /dev/ttyUSB0 | xxd",
         stop_command=os.getenv("GUN_STOP_COMMAND", "printf '\\x30' > /dev/ttyUSB0").strip()
