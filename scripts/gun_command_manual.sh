@@ -29,7 +29,7 @@ case "$GUN_ACTION" in
     REMOTE_COMMAND="if [ -f /tmp/go2_gun_fire.pid ] && kill -0 \$(cat /tmp/go2_gun_fire.pid) 2>/dev/null; then echo OK START already-active; else rm -f /tmp/go2_gun_fire.pid; $CHMOD_USB && setsid bash -lc $FIRE_COMMAND_Q >/tmp/go2_gun_fire.log 2>&1 & pid=\$!; echo \$pid > /tmp/go2_gun_fire.pid; echo OK START pid=\$pid; fi"
     ;;
   STOP)
-    REMOTE_COMMAND="if [ -f /tmp/go2_gun_fire.pid ]; then pid=\$(cat /tmp/go2_gun_fire.pid); kill -INT -\$pid 2>/dev/null || kill -INT \$pid 2>/dev/null || true; sleep 0.2; kill -TERM -\$pid 2>/dev/null || kill -TERM \$pid 2>/dev/null || true; rm -f /tmp/go2_gun_fire.pid; fi; $CHMOD_USB && bash -lc $STOP_COMMAND_Q && echo OK STOP"
+    REMOTE_COMMAND="if [ -f /tmp/go2_gun_fire.pid ]; then pid=\$(cat /tmp/go2_gun_fire.pid); kill -INT \$pid 2>/dev/null || true; sleep 0.2; kill -TERM \$pid 2>/dev/null || true; rm -f /tmp/go2_gun_fire.pid; fi; $CHMOD_USB && bash -lc $STOP_COMMAND_Q; status=\$?; echo OK STOP status=\$status; exit 0"
     ;;
   TEST)
     REMOTE_COMMAND="$CHMOD_USB && echo OK TEST"
@@ -50,9 +50,8 @@ spawn ssh -p $env(GUN_LOCAL_SSH_PORT) -o StrictHostKeyChecking=accept-new $env(G
 expect {
   -re "(?i)password:" { send -- "$env(GUN_JETSON_PASSWORD)\r"; exp_continue }
   -re "(?i)sorry" { puts stderr "sudo password rejected"; exit 1 }
-  -re "OK (START|STOP|TEST)" {
+  -re "OK (START|STOP|TEST)(\[^\r\n\]*)?" {
     puts $expect_out(0,string)
-    expect eof
     exit 0
   }
   timeout { puts stderr "timed out running $env(GUN_ACTION)"; exit 124 }
