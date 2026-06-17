@@ -140,6 +140,30 @@ tail -f /tmp/go2_gun_relay.log
 The Jetson-side command log is written through the tunnel to
 `/tmp/go2_gun_remote.log`.
 
+### Dog-to-Jetson subnet startup
+
+If the dog rebooted and the Jetson Ethernet subnet is gone, run this from the
+WSL instance:
+
+```bash
+GUN_DOG_PASSWORD=your-dog-root-password ./scripts/setup_dog_jetson_1042_subnet_over_ssh.sh
+```
+
+That copies and runs `scripts/setup_dog_jetson_1042_subnet.sh` on the dog. The
+dog-side script does the runtime setup from the screenshot:
+
+```bash
+ip addr add 10.42.0.1/24 dev eth0
+echo 1 > /proc/sys/net/ipv4/ip_forward
+iptables -t nat -A POSTROUTING -s 10.42.0.0/24 -o wlan0 -j MASQUERADE
+iptables -A FORWARD -i eth0 -s 10.42.0.0/24 -o wlan0 -j ACCEPT
+iptables -A FORWARD -i wlan0 -o eth0 -d 10.42.0.0/24 -m state --state RELATED,ESTABLISHED -j ACCEPT
+```
+
+The script is idempotent: it checks whether the IP and iptables rules already
+exist before adding them. It keeps the dog's existing `192.168.123.161` eth0
+address.
+
 FaceID enrollment requires a face embedding backend. For CPU use:
 
 ```bash
