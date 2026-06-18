@@ -486,6 +486,12 @@ _INDEX_HTML = """<!doctype html>
     .video { position:relative; min-width:0; min-height:0; background:#050607; display:flex; align-items:center; justify-content:center; overflow:hidden; }
     #video { width:100%; height:100%; object-fit:contain; display:block; }
     #overlay { position:absolute; inset:0; pointer-events:none; }
+    .crosshair { position:absolute; left:50%; top:50%; width:74px; height:74px; transform:translate(-50%, -50%); pointer-events:none; opacity:.82; filter:drop-shadow(0 1px 2px rgba(0,0,0,.9)); }
+    .crosshair::before, .crosshair::after { content:""; position:absolute; background:rgba(255,255,255,.88); }
+    .crosshair::before { left:50%; top:0; bottom:0; width:2px; transform:translateX(-50%); }
+    .crosshair::after { top:50%; left:0; right:0; height:2px; transform:translateY(-50%); }
+    .crosshair-ring { position:absolute; inset:22px; border:2px solid rgba(255,255,255,.88); border-radius:50%; box-shadow:0 0 0 1px rgba(0,0,0,.55) inset; }
+    .crosshair-dot { position:absolute; left:50%; top:50%; width:5px; height:5px; border-radius:50%; background:#f1c94a; transform:translate(-50%, -50%); box-shadow:0 0 0 1px rgba(0,0,0,.75); }
     .box { position:absolute; border:2px solid #f1c94a; box-shadow:0 0 0 1px rgba(0,0,0,.8); color:#111; font-size:12px; font-weight:800; }
     .box span { background:#f1c94a; padding:1px 4px; position:absolute; left:-2px; top:-20px; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .hint { color:var(--muted); font-size:12px; margin-top:8px; }
@@ -571,6 +577,7 @@ _INDEX_HTML = """<!doctype html>
     <section class="video" id="videoPanel">
       <img id="video" src="/video.mjpg" alt="Live robot video">
       <div id="overlay"></div>
+      <div class="crosshair" aria-hidden="true"><span class="crosshair-ring"></span><span class="crosshair-dot"></span></div>
     </section>
   </main>
   <script>
@@ -739,11 +746,14 @@ _INDEX_HTML = """<!doctype html>
       if (!button) return false;
       return Boolean(button.pressed) || Number(button.value || 0) >= threshold;
     }
-    function rightTriggerDown(pad) {
-      if (buttonDown(pad, 7, 0.25)) return true;
+    function rightTriggerDown(pad, wasDown = false) {
+      const button = pad.buttons[7];
+      if (button?.pressed) return true;
+      const value = Number(button?.value || 0);
+      if (value >= (wasDown ? 0.12 : 0.32)) return true;
       const axis = pad.axes[5];
       if (typeof axis === "number") {
-        return axis > 0.45 || axis < -0.45;
+        return axis > (wasDown ? 0.20 : 0.55);
       }
       return false;
     }
@@ -776,7 +786,7 @@ _INDEX_HTML = """<!doctype html>
       };
       if (gamepad.active) pulseMove();
 
-      const rt = rightTriggerDown(pad);
+      const rt = rightTriggerDown(pad, gamepadFireDown);
       if (rt && !gamepadFireDown) gunFire();
       if (!rt && gamepadFireDown) gunStop();
       gamepadFireDown = rt;
