@@ -734,6 +734,19 @@ _INDEX_HTML = """<!doctype html>
     function deadzone(value, zone = 0.18) {
       return Math.abs(value) < zone ? 0 : value;
     }
+    function buttonDown(pad, index, threshold = 0.35) {
+      const button = pad.buttons[index];
+      if (!button) return false;
+      return Boolean(button.pressed) || Number(button.value || 0) >= threshold;
+    }
+    function rightTriggerDown(pad) {
+      if (buttonDown(pad, 7, 0.25)) return true;
+      const axis = pad.axes[5];
+      if (typeof axis === "number") {
+        return axis > 0.45 || axis < -0.45;
+      }
+      return false;
+    }
     function pollGamepad() {
       const pads = navigator.getGamepads ? navigator.getGamepads() : [];
       const pad = Array.from(pads).find(Boolean);
@@ -759,15 +772,15 @@ _INDEX_HTML = """<!doctype html>
       };
       if (gamepad.active) pulseMove();
 
-      const rt = Boolean(pad.buttons[7]?.pressed);
+      const rt = rightTriggerDown(pad);
       if (rt && !gamepadFireDown) gunFire();
       gamepadFireDown = rt;
 
-      const a = Boolean(pad.buttons[0]?.pressed);
+      const a = buttonDown(pad, 0);
       if (a && !gamepadJumpDown) jumpNow();
       gamepadJumpDown = a;
 
-      const b = Boolean(pad.buttons[1]?.pressed);
+      const b = buttonDown(pad, 1);
       if (b && !gamepadStopDown) gunStop();
       gamepadStopDown = b;
 
