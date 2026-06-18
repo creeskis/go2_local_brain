@@ -39,7 +39,7 @@ export FORCE_MOTION_MODE="${FORCE_MOTION_MODE:-normal}"
 
 exec python -m go2_local_brain.ai_autonomy_gui \
   --host "${GO2_AI_HOST:-127.0.0.1}" \
-  --port "${GO2_AI_PORT:-8776}" \
+  --port "${GO2_AI_PORT:-8777}" \
   --maps-dir "${GO2_AI_MAPS_DIR:-maps}" \
   --allow-no-detector \
   "$@"

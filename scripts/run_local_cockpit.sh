@@ -49,9 +49,6 @@ export GUN_LOG_FILE="${GUN_LOG_FILE:-/tmp/go2_gun_relay.log}"
 export GUN_REMOTE_LOG_FILE="${GUN_REMOTE_LOG_FILE:-/tmp/go2_gun_remote.log}"
 export GUN_TUNNEL_SCRIPT="${GUN_TUNNEL_SCRIPT:-scripts/gun_tunnel_manual.sh}"
 export GUN_COMMAND_SCRIPT="${GUN_COMMAND_SCRIPT:-scripts/gun_command_manual.sh}"
-export GUN_FIRE_SCRIPT="${GUN_FIRE_SCRIPT:-scripts/gun_fire_manual.sh}"
-export GUN_STOP_SCRIPT="${GUN_STOP_SCRIPT:-scripts/gun_stop_manual.sh}"
-export GUN_TEST_SCRIPT="${GUN_TEST_SCRIPT:-scripts/gun_test_manual.sh}"
 if [[ "${GUN_FIRE_COMMAND:-}" == "sudo bash -lc 'cat /dev/ttyUSB0 | xxd'" ]]; then
   GUN_FIRE_COMMAND="cat /dev/ttyUSB0 | xxd"
 fi

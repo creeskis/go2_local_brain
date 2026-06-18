@@ -1,5 +1,9 @@
 # go2_local_brain
 
+Current launch surfaces are split on purpose. See
+[docs/current_cockpits.md](docs/current_cockpits.md) for the lean operator
+cockpit, the separate LiDAR viewer, and the old AI/autonomy cockpit.
+
 A local control stack for the **Unitree Go2 Air**. You run it on your own
 machine (WSL/Linux), it connects to the dog over the dog's own Wi‑Fi using
 WebRTC, and it gives you a **browser cockpit**: live video, keyboard driving

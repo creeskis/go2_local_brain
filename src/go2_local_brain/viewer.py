@@ -141,13 +141,14 @@ class Go2BrowserViewer:
     async def _close_robot(self) -> None:
         if self._conn is None:
             return
-        try:
-            datachannel = getattr(self._conn, "datachannel", None)
-            pubsub = getattr(datachannel, "pub_sub", None) if datachannel is not None else None
-            if pubsub is not None:
-                pubsub.publish_without_callback(_LIDAR_SWITCH_TOPIC, "off")
-        except Exception as exc:  # noqa: BLE001
-            log.debug("lidar switch off failed: %s", exc)
+        if self._enable_lidar:
+            try:
+                datachannel = getattr(self._conn, "datachannel", None)
+                pubsub = getattr(datachannel, "pub_sub", None) if datachannel is not None else None
+                if pubsub is not None:
+                    pubsub.publish_without_callback(_LIDAR_SWITCH_TOPIC, "off")
+            except Exception as exc:  # noqa: BLE001
+                log.debug("lidar switch off failed: %s", exc)
         try:
             await self._conn.disconnect()
         except Exception as exc:  # noqa: BLE001
@@ -246,6 +247,8 @@ class Go2BrowserViewer:
         return ws
 
     async def _video_stream(self, _request: web.Request) -> web.StreamResponse:
+        if not self._enable_video:
+            raise web.HTTPNotFound(text="video is disabled for this viewer")
         response = web.StreamResponse(
             status=200,
             headers={"Content-Type": "multipart/x-mixed-replace; boundary=frame"},
