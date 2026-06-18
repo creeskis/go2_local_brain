@@ -555,7 +555,7 @@ _INDEX_HTML = """<!doctype html>
           <button id="gunStopBtn" onclick="gunStop()">Stop Fire</button>
           <button class="fire" id="gunFireBtn" onclick="gunFire()">Start Fire</button>
         </div>
-        <div class="hint">Optional relay. Right trigger starts fire. Xbox B stops fire. Release does not stop firing.</div>
+        <div class="hint">Optional relay. Hold right trigger to fire. Release right trigger or press Xbox B to stop.</div>
         <div class="log" id="gunLog">waiting for relay log</div>
       </div>
 
@@ -751,6 +751,10 @@ _INDEX_HTML = """<!doctype html>
       const pads = navigator.getGamepads ? navigator.getGamepads() : [];
       const pad = Array.from(pads).find(Boolean);
       if (!pad) {
+        if (gamepadFireDown) {
+          gamepadFireDown = false;
+          gunStop();
+        }
         if (gamepad.active) {
           gamepad = {vx:0, vy:0, vyaw:0, active:false};
           stopNow();
@@ -774,6 +778,7 @@ _INDEX_HTML = """<!doctype html>
 
       const rt = rightTriggerDown(pad);
       if (rt && !gamepadFireDown) gunFire();
+      if (!rt && gamepadFireDown) gunStop();
       gamepadFireDown = rt;
 
       const a = buttonDown(pad, 0);
