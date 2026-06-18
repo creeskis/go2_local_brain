@@ -14,9 +14,10 @@ from typing import Any
 from aiohttp import web
 
 from .config import load_config
-from .autonomy.face_id import FaceDatabase, FaceIdentifier, UNKNOWN_LABEL, build_face_embedder
+from .autonomy.face_id import FaceDatabase, FaceIdentifier, NullFaceEmbedder, UNKNOWN_LABEL, build_face_embedder
 from .driver.webrtc_client import Go2Config, Go2WebRTCClient
 from .gun_relay import GunRelay, gun_relay_config_from_env
+from .viewer import _lidar_payload_from_message
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +25,10 @@ _MOVE_DURATION_S = 0.16
 _FACE_INTERVAL_S = max(0.20, float(os.getenv("GO2_FACE_INTERVAL_S", "0.65")))
 _FACE_DETECT_MAX_WIDTH = max(160, int(os.getenv("GO2_FACE_DETECT_MAX_WIDTH", "640")))
 _DEFAULT_FACE_BACKEND = "face_recognition"
+_LIDAR_SWITCH_TOPIC = "rt/utlidar/switch"
+_LIDAR_TOPIC = "rt/utlidar/voxel_map"
+_LIDAR_ARRAY_TOPIC = "rt/utlidar/voxel_map_compressed"
+_MAX_LIDAR_POINTS = max(100, int(os.getenv("GO2_LIDAR_MAX_POINTS", "900")))
 
 
 class LocalCockpit:
@@ -49,8 +54,17 @@ class LocalCockpit:
         self._face_db_path = Path(os.getenv("GO2_FACE_DB", str(FaceDatabase.default_path()))).expanduser()
         self._latest_image: Any = None
         self._battery_percent: float | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._latest_lidar: dict[str, Any] | None = None
+        self._latest_lidar_ts = 0.0
+        self._lidar_raw_messages = 0
+        self._lidar_messages = 0
+        self._lidar_parse_errors = 0
+        self._lidar_last_error = ""
+        self._available_sport_commands: list[str] = []
 
     async def run(self) -> None:
+        self._loop = asyncio.get_running_loop()
         cfg = load_config()
         self._client = Go2WebRTCClient(
             Go2Config(
@@ -71,9 +85,11 @@ class LocalCockpit:
         app.router.add_get("/", self._index)
         app.router.add_get("/video.mjpg", self._video_stream)
         app.router.add_get("/status.json", self._status_json)
+        app.router.add_get("/lidar.json", self._lidar_json)
         app.router.add_post("/api/move", self._move_action)
         app.router.add_post("/api/stop", self._stop_action)
         app.router.add_post("/api/jump", self._jump_action)
+        app.router.add_post("/api/sport", self._sport_action)
         app.router.add_post("/api/gun/preconnect", self._gun_preconnect)
         app.router.add_post("/api/gun/test", self._gun_test)
         app.router.add_post("/api/gun/status", self._gun_status)
@@ -100,10 +116,13 @@ class LocalCockpit:
         assert self._client is not None
         self._status = "connecting"
         await self._client.connect()
+        self._available_sport_commands = self._client.available_sport_commands()
         self._attach_video()
+        self._attach_lidar()
         self._status = "connected"
 
     async def _shutdown(self) -> None:
+        self._detach_lidar()
         if self._client is not None:
             await self._client.close()
 
@@ -115,6 +134,52 @@ class LocalCockpit:
             raise RuntimeError("WebRTC video interface not found")
         video.switchVideoChannel(True)
         video.add_track_callback(self._recv_video_track)
+
+    def _attach_lidar(self) -> None:
+        assert self._client is not None
+        conn = getattr(self._client, "_conn", None)
+        datachannel = getattr(conn, "datachannel", None) or getattr(conn, "data_channel", None)
+        pubsub = getattr(datachannel, "pub_sub", None) if datachannel is not None else None
+        if pubsub is None:
+            self._lidar_last_error = "WebRTC data channel pub/sub unavailable"
+            log.warning(self._lidar_last_error)
+            return
+        try:
+            pubsub.publish_without_callback(_LIDAR_SWITCH_TOPIC, "on")
+            pubsub.subscribe(_LIDAR_TOPIC, self._on_lidar_message)
+            pubsub.subscribe(_LIDAR_ARRAY_TOPIC, self._on_lidar_message)
+        except Exception as exc:  # noqa: BLE001
+            self._lidar_last_error = f"LiDAR subscribe failed: {exc}"
+            log.warning(self._lidar_last_error)
+
+    def _detach_lidar(self) -> None:
+        if self._client is None:
+            return
+        conn = getattr(self._client, "_conn", None)
+        datachannel = getattr(conn, "datachannel", None) or getattr(conn, "data_channel", None)
+        pubsub = getattr(datachannel, "pub_sub", None) if datachannel is not None else None
+        if pubsub is None:
+            return
+        try:
+            pubsub.publish_without_callback(_LIDAR_SWITCH_TOPIC, "off")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("lidar switch off failed: %s", exc)
+
+    def _on_lidar_message(self, message: Any) -> None:
+        self._lidar_raw_messages += 1
+        payload = _lidar_payload_from_message(message, max_points=_MAX_LIDAR_POINTS)
+        if payload is None:
+            self._lidar_parse_errors += 1
+            self._lidar_last_error = "unparsed LiDAR payload"
+            return
+        if self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(lambda: asyncio.create_task(self._set_lidar(payload)))
+
+    async def _set_lidar(self, payload: dict[str, Any]) -> None:
+        self._latest_lidar = payload
+        self._latest_lidar_ts = time.time()
+        self._lidar_messages += 1
 
     async def _recv_video_track(self, track: Any) -> None:
         while True:
@@ -134,13 +199,13 @@ class LocalCockpit:
                 self._state_changed.notify_all()
 
     def _load_face_detector(self) -> None:
+        database = FaceDatabase.load_or_empty(self._face_db_path)
         try:
-            database = FaceDatabase.load_or_empty(self._face_db_path)
             embedder = build_face_embedder(self._face_backend)
             self._face_identifier = FaceIdentifier(embedder, database)
         except Exception as exc:  # noqa: BLE001
-            self._face_identifier = None
-            self._face_error = str(exc)
+            self._face_identifier = FaceIdentifier(NullFaceEmbedder(), database)
+            self._face_error = f"recognition unavailable, detection only: {exc}"
 
     def _identify_faces(self, image: Any) -> list[dict[str, Any]]:
         if self._face_identifier is None:
@@ -171,6 +236,9 @@ class LocalCockpit:
 
     async def _status_json(self, _request: web.Request) -> web.Response:
         return web.json_response(self._status_payload())
+
+    async def _lidar_json(self, _request: web.Request) -> web.Response:
+        return web.json_response(self._lidar_payload())
 
     async def _video_stream(self, request: web.Request) -> web.StreamResponse:
         response = web.StreamResponse(
@@ -257,6 +325,24 @@ class LocalCockpit:
         self._last_result = "jump"
         return web.json_response({"ok": True, "result": "jump"})
 
+    async def _sport_action(self, request: web.Request) -> web.Response:
+        if self._client is None:
+            return web.json_response({"ok": False, "result": "robot is not connected"}, status=503)
+        payload = await _json_or_empty(request)
+        name = str(payload.get("name", "")).strip()
+        parameter = payload.get("parameter")
+        if not name:
+            return web.json_response({"ok": False, "result": "sport command name is required"}, status=400)
+        if parameter is not None and not isinstance(parameter, dict):
+            return web.json_response({"ok": False, "result": "sport parameter must be an object"}, status=400)
+        try:
+            await self._client.sport_command(name, parameter)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("sport command failed: %s", name)
+            return web.json_response({"ok": False, "result": f"sport command failed: {exc}"}, status=400)
+        self._last_result = f"sport {name}"
+        return web.json_response({"ok": True, "result": self._last_result})
+
     async def _gun_preconnect(self, _request: web.Request) -> web.Response:
         try:
             result = await self._gun.preconnect()
@@ -306,6 +392,21 @@ class LocalCockpit:
         if self._client is not None:
             await self._client.stop()
 
+    def _lidar_payload(self) -> dict[str, Any]:
+        now = time.time()
+        lidar_age = None if not self._latest_lidar_ts else now - self._latest_lidar_ts
+        latest = self._latest_lidar or {}
+        return {
+            "latest": latest,
+            "lidar_messages": self._lidar_messages,
+            "lidar_raw_messages": self._lidar_raw_messages,
+            "lidar_parse_errors": self._lidar_parse_errors,
+            "lidar_age_s": lidar_age,
+            "lidar_last_error": self._lidar_last_error,
+            "point_count": latest.get("point_count", 0),
+            "source_point_count": latest.get("source_point_count", 0),
+        }
+
     def _status_payload(self) -> dict[str, Any]:
         sport_state = getattr(self._client, "_sport_state", {}) if self._client is not None else {}
         self._battery_percent = _extract_battery_percent(sport_state)
@@ -318,6 +419,8 @@ class LocalCockpit:
             "face_backend": self._face_backend,
             "face_error": self._face_error,
             "face_db": str(self._face_db_path),
+            "lidar": self._lidar_payload(),
+            "sport_commands": self._available_sport_commands,
             "gun_active": self._gun.active,
             "gun": self._gun.snapshot(),
             "battery_percent": self._battery_percent,
@@ -433,15 +536,19 @@ _INDEX_HTML = """<!doctype html>
     .metric b { display:block; font-size:16px; line-height:1.1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .metric span { display:block; color:var(--muted); font-size:11px; margin-top:3px; }
     .section { padding:10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); margin-top:10px; }
-    .video { position:relative; min-width:0; min-height:0; background:#050607; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+    .stage { min-width:0; min-height:0; display:grid; grid-template-rows:minmax(0, 1fr) 260px; background:#050607; }
+    .video { position:relative; min-width:0; min-height:0; background:#050607; display:flex; align-items:center; justify-content:center; overflow:hidden; border-bottom:1px solid var(--line); }
     #video { width:100%; height:100%; object-fit:contain; display:block; }
     #overlay { position:absolute; inset:0; pointer-events:none; }
+    .lidar { position:relative; min-width:0; min-height:0; background:#090c0f; }
+    #lidarCanvas { width:100%; height:100%; display:block; }
+    .lidarHud { position:absolute; left:12px; top:10px; padding:7px 9px; border:1px solid rgba(255,255,255,.16); border-radius:6px; background:rgba(0,0,0,.62); color:#c8d1d8; font-size:12px; }
     .box { position:absolute; border:2px solid #f1c94a; box-shadow:0 0 0 1px rgba(0,0,0,.8); color:#111; font-size:12px; font-weight:800; }
     .box span { background:#f1c94a; padding:1px 4px; position:absolute; left:-2px; top:-20px; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .hint { color:var(--muted); font-size:12px; margin-top:8px; }
     .log { height:132px; overflow:auto; margin-top:8px; padding:8px; border:1px solid var(--line); border-radius:6px; background:#090b0d; color:#b8c0c7; font:11px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; white-space:pre-wrap; }
     .kbd { font-weight:750; }
-    @media (max-width: 860px) { html, body { overflow:auto; } main { min-height:100vh; height:auto; grid-template-columns:1fr; grid-template-rows:auto 68vh; } aside { border-right:0; border-bottom:1px solid var(--line); } }
+    @media (max-width: 860px) { html, body { overflow:auto; } main { min-height:100vh; height:auto; grid-template-columns:1fr; grid-template-rows:auto 82vh; } aside { border-right:0; border-bottom:1px solid var(--line); } .stage { grid-template-rows:minmax(0, 1fr) 220px; } }
   </style>
 </head>
 <body>
@@ -476,6 +583,28 @@ _INDEX_HTML = """<!doctype html>
       </div>
 
       <div class="section">
+        <h2>Motion</h2>
+        <div class="grid2">
+          <button onclick="sport('BalanceStand')">Balance</button>
+          <button onclick="sport('RecoveryStand')">Recover</button>
+          <button onclick="sport('StandUp')">Stand Up</button>
+          <button onclick="sport('StandDown')">Stand Down</button>
+          <button onclick="sport('Sit')">Sit</button>
+          <button onclick="sport('RiseSit')">Rise</button>
+          <button onclick="sport('Stretch')">Stretch</button>
+          <button onclick="sport('Hello')">Hello</button>
+          <button onclick="sport('FrontJump')">Front Jump</button>
+          <button onclick="sport('FrontPounce')">Pounce</button>
+          <button onclick="sport('FrontFlip', {data:true})">Front Flip</button>
+          <button onclick="sport('BackFlip', {data:true})">Back Flip</button>
+          <button onclick="sport('LeftFlip', {data:true})">Left Flip</button>
+          <button onclick="sport('Dance1')">Dance 1</button>
+          <button onclick="sport('Dance2')">Dance 2</button>
+          <button onclick="sport('SpeedLevel', {data:2})">Speed 2</button>
+        </div>
+      </div>
+
+      <div class="section">
         <h2>USB Trigger</h2>
         <div class="grid2">
           <button class="pre" id="gunReadyBtn" onclick="gunPreconnect()">Connect</button>
@@ -496,9 +625,15 @@ _INDEX_HTML = """<!doctype html>
         <div class="hint" id="faceStatus">waiting</div>
       </div>
     </aside>
-    <section class="video" id="videoPanel">
-      <img id="video" src="/video.mjpg" alt="Live robot video">
-      <div id="overlay"></div>
+    <section class="stage">
+      <div class="video" id="videoPanel">
+        <img id="video" src="/video.mjpg" alt="Live robot video">
+        <div id="overlay"></div>
+      </div>
+      <div class="lidar">
+        <canvas id="lidarCanvas"></canvas>
+        <div class="lidarHud">LiDAR <span id="lidarCount">0</span><br><span id="lidarStatus">waiting</span></div>
+      </div>
     </section>
   </main>
   <script>
@@ -514,6 +649,10 @@ _INDEX_HTML = """<!doctype html>
     const gunStopBtn = document.getElementById("gunStopBtn");
     const gunReadyBtn = document.getElementById("gunReadyBtn");
     const gunStatusBtn = document.getElementById("gunStatusBtn");
+    const lidarCanvas = document.getElementById("lidarCanvas");
+    const lidarCount = document.getElementById("lidarCount");
+    const lidarStatus = document.getElementById("lidarStatus");
+    const lidarCtx = lidarCanvas.getContext("2d");
     const active = new Set();
     let tick = null;
     let current = {vx:0, vy:0, vyaw:0};
@@ -619,6 +758,7 @@ _INDEX_HTML = """<!doctype html>
     function gunStatus() { return api("/api/gun/status").catch(() => {}); }
     function gunFire() { return api("/api/gun/fire").catch(() => {}); }
     function gunStop() { return api("/api/gun/stop").catch(() => {}); }
+    function sport(name, parameter = null) { return api("/api/sport", {name, parameter}).catch(() => {}); }
     function enrollFace() {
       const input = document.getElementById("faceName");
       let label = input.value.trim();
@@ -721,6 +861,54 @@ _INDEX_HTML = """<!doctype html>
       gunStatusBtn.disabled = busy;
       gunLogEl.textContent = (gun?.log_tail || []).join("\\n") || "no relay log yet";
     }
+    function drawLidar(lidar) {
+      const rect = lidarCanvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.floor(rect.width * dpr));
+      const height = Math.max(1, Math.floor(rect.height * dpr));
+      if (lidarCanvas.width !== width || lidarCanvas.height !== height) {
+        lidarCanvas.width = width;
+        lidarCanvas.height = height;
+      }
+      const ctx = lidarCtx;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      ctx.fillStyle = "#090c0f";
+      ctx.fillRect(0, 0, rect.width, rect.height);
+      const cx = rect.width / 2;
+      const cy = rect.height * 0.72;
+      const scale = Math.min(rect.width, rect.height) / 8;
+      ctx.strokeStyle = "rgba(255,255,255,.12)";
+      ctx.lineWidth = 1;
+      for (let r = 1; r <= 4; r++) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r * scale, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = "rgba(255,255,255,.22)";
+      ctx.beginPath();
+      ctx.moveTo(cx - 10, cy);
+      ctx.lineTo(cx + 10, cy);
+      ctx.moveTo(cx, cy - 10);
+      ctx.lineTo(cx, cy + 10);
+      ctx.stroke();
+      const points = lidar?.latest?.robot_points || [];
+      ctx.fillStyle = "#58b7ff";
+      for (const p of points) {
+        if (!p || p.length < 3) continue;
+        const x = cx + Number(p[1]) * scale;
+        const y = cy - Number(p[0]) * scale;
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        if (x < -4 || y < -4 || x > rect.width + 4 || y > rect.height + 4) continue;
+        ctx.fillRect(x, y, 2, 2);
+      }
+      const count = lidar?.point_count || 0;
+      const raw = lidar?.source_point_count || 0;
+      const age = lidar?.lidar_age_s == null ? "none" : `${lidar.lidar_age_s.toFixed(1)}s`;
+      lidarCount.textContent = `${count}/${raw}`;
+      lidarStatus.textContent = `raw=${lidar?.lidar_raw_messages || 0} parsed=${lidar?.lidar_messages || 0} age=${age}`;
+      if (lidar?.lidar_last_error) lidarStatus.textContent += ` / ${lidar.lidar_last_error}`;
+    }
     async function refreshStatus() {
       const res = await fetch("/status.json");
       const data = await res.json();
@@ -735,6 +923,7 @@ _INDEX_HTML = """<!doctype html>
       statusEl.textContent = `${data.status} / gun ${gunState}\\n${data.last_result || gun.last_result || ""}${gun.last_error ? "\\n" + gun.last_error : ""}`;
       applyGunState(gun);
       drawFaces(data);
+      drawLidar(data.lidar || {});
     }
     setInterval(refreshStatus, 400);
     refreshStatus();
