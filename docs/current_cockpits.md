@@ -44,8 +44,10 @@ For the weaker Kali WSL host, keep Face ID light unless you know the machine can
 handle more:
 
 ```env
-GO2_FACE_INTERVAL_S=0.65
-GO2_FACE_DETECT_MAX_WIDTH=640
+GO2_FACE_ENABLED=1
+GO2_FACE_INTERVAL_S=1.25
+GO2_FACE_DETECT_MAX_WIDTH=360
+GO2_JPEG_QUALITY=68
 ```
 
 If the USB trigger relay is not in use, leave the `GUN_*` passwords blank.

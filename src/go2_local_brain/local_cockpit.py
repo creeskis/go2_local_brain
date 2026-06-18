@@ -20,10 +20,13 @@ from .gun_relay import GunRelay, gun_relay_config_from_env
 
 log = logging.getLogger(__name__)
 
-_MOVE_DURATION_S = 0.16
-_FACE_INTERVAL_S = max(0.20, float(os.getenv("GO2_FACE_INTERVAL_S", "0.65")))
-_FACE_DETECT_MAX_WIDTH = max(160, int(os.getenv("GO2_FACE_DETECT_MAX_WIDTH", "640")))
+_MOVE_DURATION_S = 0.20
+_FACE_ENABLED = os.getenv("GO2_FACE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+_FACE_INTERVAL_S = max(0.50, float(os.getenv("GO2_FACE_INTERVAL_S", "1.25")))
+_FACE_DETECT_MAX_WIDTH = max(160, int(os.getenv("GO2_FACE_DETECT_MAX_WIDTH", "360")))
 _DEFAULT_FACE_BACKEND = "face_recognition"
+_JPEG_QUALITY = min(90, max(35, int(os.getenv("GO2_JPEG_QUALITY", "68"))))
+_FACE_CASCADE: Any | None = None
 
 
 class LocalCockpit:
@@ -48,6 +51,7 @@ class LocalCockpit:
         self._face_identifier: FaceIdentifier | None = None
         self._face_db_path = Path(os.getenv("GO2_FACE_DB", str(FaceDatabase.default_path()))).expanduser()
         self._latest_image: Any = None
+        self._face_task: asyncio.Task[list[dict[str, Any]]] | None = None
         self._battery_percent: float | None = None
         self._available_sport_commands: list[str] = []
 
@@ -107,6 +111,8 @@ class LocalCockpit:
         self._status = "connected"
 
     async def _shutdown(self) -> None:
+        if self._face_task is not None:
+            self._face_task.cancel()
         if self._client is not None:
             await self._client.close()
 
@@ -126,9 +132,9 @@ class LocalCockpit:
             self._latest_image = image.convert("RGB")
             self._video_size = {"width": int(getattr(image, "width", 0)), "height": int(getattr(image, "height", 0))}
             now = time.monotonic()
-            if now - self._last_face_scan >= _FACE_INTERVAL_S:
+            if _FACE_ENABLED and now - self._last_face_scan >= _FACE_INTERVAL_S and self._face_scan_available():
                 self._last_face_scan = now
-                self._faces = self._identify_faces(self._latest_image)
+                self._start_face_scan(self._latest_image)
             jpeg = _jpeg_from_image(image)
             async with self._state_changed:
                 self._latest_jpeg = jpeg
@@ -168,6 +174,24 @@ class LocalCockpit:
         except Exception as exc:  # noqa: BLE001
             self._face_error = str(exc)
             return []
+
+    def _face_scan_available(self) -> bool:
+        return self._face_task is None or self._face_task.done()
+
+    def _start_face_scan(self, image: Any) -> None:
+        self._face_task = asyncio.create_task(self._identify_faces_off_loop(image), name="go2-face-scan")
+        self._face_task.add_done_callback(self._finish_face_scan)
+
+    async def _identify_faces_off_loop(self, image: Any) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._identify_faces, image)
+
+    def _finish_face_scan(self, task: asyncio.Task[list[dict[str, Any]]]) -> None:
+        try:
+            self._faces = task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._face_error = str(exc)
 
     async def _index(self, _request: web.Request) -> web.Response:
         return web.Response(text=_INDEX_HTML, content_type="text/html")
@@ -348,11 +372,12 @@ class LocalCockpit:
 
 def _jpeg_from_image(image: Any) -> bytes:
     with io.BytesIO() as out:
-        image.save(out, format="JPEG", quality=80)
+        image.save(out, format="JPEG", quality=_JPEG_QUALITY)
         return out.getvalue()
 
 
 def _face_boxes(image: Any) -> list[tuple[int, int, int, int]]:
+    global _FACE_CASCADE
     try:
         import cv2  # type: ignore
         import numpy as np  # type: ignore
@@ -368,8 +393,11 @@ def _face_boxes(image: Any) -> list[tuple[int, int, int, int]]:
         source = source.resize((int(width * scale), int(height * scale)))
     arr = np.asarray(source)
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48))
+    if _FACE_CASCADE is None:
+        _FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        if _FACE_CASCADE.empty():
+            raise RuntimeError("OpenCV face cascade is empty")
+    faces = _FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48))
     return [
         (int(x / scale), int(y / scale), int((x + w) / scale), int((y + h) / scale))
         for x, y, w, h in faces
@@ -567,6 +595,10 @@ _INDEX_HTML = """<!doctype html>
     let gamepadStopDown = false;
     let latestFaces = [];
     let lastStatus = null;
+    let lastMoveSent = 0;
+    let moveInFlight = false;
+    let pendingMove = false;
+    const moveSendIntervalMs = 140;
     const gunBusyStates = new Set(["checking", "starting", "stopping"]);
 
     function speed() { return Number(document.getElementById("speed").value); }
@@ -591,25 +623,46 @@ _INDEX_HTML = """<!doctype html>
       vx += gamepad.vx;
       vy += gamepad.vy;
       vyaw += gamepad.vyaw;
-      return {vx, vy, vyaw, duration_s:0.16};
+      return {vx, vy, vyaw, duration_s:0.20};
     }
     function smoothToward(target) {
       const gain = 0.28;
       current.vx += (target.vx - current.vx) * gain;
       current.vy += (target.vy - current.vy) * gain;
       current.vyaw += (target.vyaw - current.vyaw) * gain;
-      return {vx:current.vx, vy:current.vy, vyaw:current.vyaw, duration_s:0.16};
+      return {vx:current.vx, vy:current.vy, vyaw:current.vyaw, duration_s:0.20};
     }
-    function pulseMove() {
+    function pulseMove(force = false) {
       const body = smoothToward(vectorFromActive());
-      if (Math.abs(body.vx) > 0.01 || Math.abs(body.vy) > 0.01 || Math.abs(body.vyaw) > 0.01) {
-        api("/api/move", body).catch(() => {});
+      if (Math.abs(body.vx) <= 0.01 && Math.abs(body.vy) <= 0.01 && Math.abs(body.vyaw) <= 0.01) {
+        return;
       }
+      const now = performance.now();
+      if (!force && now - lastMoveSent < moveSendIntervalMs) {
+        pendingMove = true;
+        return;
+      }
+      if (moveInFlight) {
+        pendingMove = true;
+        return;
+      }
+      moveInFlight = true;
+      pendingMove = false;
+      lastMoveSent = now;
+      api("/api/move", body)
+        .catch(() => {})
+        .finally(() => {
+          moveInFlight = false;
+          if (pendingMove && (active.size > 0 || gamepad.active)) {
+            pendingMove = false;
+            pulseMove(true);
+          }
+        });
     }
     function hold(name) {
       active.add(name);
-      pulseMove();
-      if (!tick) tick = setInterval(pulseMove, 115);
+      pulseMove(true);
+      if (!tick) tick = setInterval(pulseMove, 150);
     }
     function release(name) {
       active.delete(name);
@@ -619,6 +672,7 @@ _INDEX_HTML = """<!doctype html>
       active.clear();
       if (tick) clearInterval(tick);
       tick = null;
+      pendingMove = false;
       current = {vx:0, vy:0, vyaw:0};
       return api("/api/stop").catch(() => {});
     }
@@ -781,7 +835,7 @@ _INDEX_HTML = """<!doctype html>
       applyGunState(gun);
       drawFaces(data);
     }
-    setInterval(refreshStatus, 400);
+    setInterval(refreshStatus, 900);
     refreshStatus();
   </script>
 </body>
