@@ -162,6 +162,18 @@ Confirm WSL can reach the dog:
 ping -c 3 192.168.123.121
 ```
 
+Reset stale dog STA/runtime state before making a fresh STA attempt:
+
+```bash
+./scripts/reset_dog_sta_runtime_over_ssh.sh
+```
+
+If eth0 still keeps the `192.168.123.0/24` route and steals LocalSTA traffic:
+
+```bash
+DOG_REMOVE_PRIMARY_ETH_STA=1 ./scripts/reset_dog_sta_runtime_over_ssh.sh
+```
+
 Check imports:
 
 ```bash
