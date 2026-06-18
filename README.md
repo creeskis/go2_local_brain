@@ -54,6 +54,14 @@ Run one WebRTC cockpit/viewer at a time unless you are deliberately testing
 multiple clients. The dog can get cranky when several viewers compete for the
 same video/data connection.
 
+For presentation video, use these in this order:
+
+1. `run_local_cockpit.sh` for the clean operator view.
+2. `run_wasd_lidar.sh` when the demo needs driving and LiDAR in one page.
+3. `run_ai_demo.sh` only for the AI segment; it starts Ollama for the session
+   if Ollama is not already running, then shuts down only the Ollama process it
+   started when you exit.
+
 ### Local Operator Cockpit
 
 ```bash
@@ -77,6 +85,23 @@ Use this for:
 - Motion buttons
 - Optional host-side trigger controls
 
+### WASD + LiDAR Demo
+
+```bash
+cd ~/robotics/go2_local_brain
+source .venv/bin/activate
+./scripts/run_wasd_lidar.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:8774
+```
+
+Use this when you need manual driving and LiDAR on the same screen for a demo.
+It is separate from the lean operator cockpit.
+
 ### LiDAR Viewer
 
 ```bash
@@ -93,6 +118,24 @@ http://127.0.0.1:8765
 
 Use this only for LiDAR. It is intentionally separate from the operator
 cockpit.
+
+### AI Demo
+
+```bash
+cd ~/robotics/go2_local_brain
+source .venv/bin/activate
+./scripts/run_ai_demo.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:8778
+```
+
+Use this for the AI demo segment. The script checks `OLLAMA_HOST`, starts
+`ollama serve` only if needed, and stops only the Ollama process it started
+when the script exits.
 
 ### Old AI / Autonomy Cockpit
 
@@ -142,8 +185,16 @@ bash -n scripts/*.sh
 | Script | URL | Purpose |
 | --- | --- | --- |
 | `./scripts/run_local_cockpit.sh` | `http://127.0.0.1:8775` | Main operator cockpit |
+| `./scripts/run_wasd_lidar.sh` | `http://127.0.0.1:8774` | WASD + LiDAR demo |
 | `./scripts/run_lidar_viewer.sh` | `http://127.0.0.1:8765` | Separate LiDAR viewer |
+| `./scripts/run_ai_demo.sh` | `http://127.0.0.1:8778` | AI + WASD + LiDAR demo |
 | `./scripts/run_ai_cockpit.sh` | `http://127.0.0.1:8777` | Old AI/autonomy cockpit |
+
+## Kept For Later
+
+Jetson and relay scripts are kept for later hardware work, but they are not
+part of the normal presentation/demo flow. Do not run the cockpit stack on the
+Jetson.
 
 ## Notes
 

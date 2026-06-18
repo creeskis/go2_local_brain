@@ -21,8 +21,8 @@ log = logging.getLogger(__name__)
 _LIDAR_SWITCH_TOPIC = "rt/utlidar/switch"
 _LIDAR_TOPIC = "rt/utlidar/voxel_map"
 _LIDAR_ARRAY_TOPIC = "rt/utlidar/voxel_map_compressed"
-_MAX_LIDAR_POINTS = 1200
-_LIDAR_SEND_PERIOD_S = 0.25
+_MAX_LIDAR_POINTS = 800
+_LIDAR_SEND_PERIOD_S = 0.35
 _MOVE_DURATION_S = 0.32
 _MODE_SETTLE_S = 0.25
 
@@ -554,7 +554,7 @@ __LIDAR_PANEL__
       resultEl.textContent = data.result || "";
       return data;
     }
-    function stopNow() { active.clear(); clearInterval(tick); tick = null; return api("/api/stop"); }
+    function stopNow() { active.clear(); pendingMove = false; clearInterval(tick); tick = null; return api("/api/stop"); }
     const active = new Set();
     let tick = null;
     function speed() { return Number(document.getElementById("speed")?.value || 0.45); }
@@ -605,14 +605,37 @@ _KEYBOARD_JS = """
       if (active.has("walkTurnRight")) { vx += s * 0.75; vyaw -= t * 0.75; }
       return {vx, vy, vyaw, duration_s:0.32};
     }
-    function pulseMove() {
+    let moveInFlight = false;
+    let pendingMove = false;
+    let lastMoveSent = 0;
+    const moveSendIntervalMs = 180;
+    function pulseMove(force = false) {
       const body = vectorFromActive();
-      if (body.vx || body.vy || body.vyaw) api("/api/move", body).catch(() => {});
+      if (!body.vx && !body.vy && !body.vyaw) return;
+      const now = performance.now();
+      if (!force && now - lastMoveSent < moveSendIntervalMs) {
+        pendingMove = true;
+        return;
+      }
+      if (moveInFlight) {
+        pendingMove = true;
+        return;
+      }
+      moveInFlight = true;
+      pendingMove = false;
+      lastMoveSent = now;
+      api("/api/move", body).catch(() => {}).finally(() => {
+        moveInFlight = false;
+        if (pendingMove && active.size > 0) {
+          pendingMove = false;
+          pulseMove(true);
+        }
+      });
     }
     function hold(name) {
       active.add(name);
-      pulseMove();
-      if (!tick) tick = setInterval(pulseMove, 240);
+      pulseMove(true);
+      if (!tick) tick = setInterval(pulseMove, 260);
     }
     function release(name) {
       active.delete(name);

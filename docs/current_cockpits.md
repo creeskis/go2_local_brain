@@ -27,6 +27,27 @@ Default URL: `http://127.0.0.1:8765`
 Purpose: LiDAR-only view. This uses the standalone viewer path and keeps LiDAR
 separate from the operator cockpit.
 
+## WASD + LiDAR demo
+
+```bash
+./scripts/run_wasd_lidar.sh
+```
+
+Default URL: `http://127.0.0.1:8774`
+
+Purpose: manual driving and LiDAR on one screen for demo recording.
+
+## AI demo
+
+```bash
+./scripts/run_ai_demo.sh
+```
+
+Default URL: `http://127.0.0.1:8778`
+
+Purpose: AI + WASD + LiDAR demo. The script starts `ollama serve` only if
+needed and stops only the Ollama process it started when it exits.
+
 ## Old AI/autonomy cockpit
 
 ```bash
