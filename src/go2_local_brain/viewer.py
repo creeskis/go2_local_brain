@@ -225,7 +225,8 @@ class Go2BrowserViewer:
         }
 
     async def _index(self, _request: web.Request) -> web.Response:
-        return web.Response(text=_INDEX_HTML, content_type="text/html")
+        html = _INDEX_HTML if self._enable_video else _LIDAR_ONLY_HTML
+        return web.Response(text=html, content_type="text/html")
 
     async def _status(self, _request: web.Request) -> web.Response:
         return web.json_response(self._status_payload())
@@ -502,6 +503,100 @@ _INDEX_HTML = """<!doctype html>
       renderer.render(scene, camera);
     }
     animate();
+  </script>
+</body>
+</html>
+"""
+
+
+_LIDAR_ONLY_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Go2 LiDAR</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #090c0f; color: #eef3f6; font: 14px/1.35 system-ui, Segoe UI, sans-serif; }
+    header { height: 44px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 14px; background: #14191e; border-bottom: 1px solid #313a43; }
+    main { height: calc(100vh - 44px); position: relative; }
+    canvas { width: 100%; height: 100%; display: block; }
+    #hud { position: absolute; left: 12px; top: 12px; padding: 8px 10px; background: rgba(0,0,0,.66); border: 1px solid rgba(255,255,255,.16); border-radius: 6px; color: #c7d0d8; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Go2 LiDAR</strong>
+    <span id="status">connecting</span>
+  </header>
+  <main>
+    <canvas id="map"></canvas>
+    <div id="hud">points: <span id="count">0</span><br><span id="detail">waiting</span></div>
+  </main>
+  <script>
+    const canvas = document.getElementById("map");
+    const ctx = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const countEl = document.getElementById("count");
+    const detailEl = document.getElementById("detail");
+
+    function draw(points) {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.floor(rect.width * dpr));
+      const height = Math.max(1, Math.floor(rect.height * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      ctx.fillStyle = "#090c0f";
+      ctx.fillRect(0, 0, rect.width, rect.height);
+      const cx = rect.width / 2;
+      const cy = rect.height * 0.68;
+      const scale = Math.min(rect.width, rect.height) / 9;
+      ctx.strokeStyle = "rgba(255,255,255,.12)";
+      ctx.lineWidth = 1;
+      for (let r = 1; r <= 5; r++) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r * scale, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = "rgba(255,255,255,.25)";
+      ctx.beginPath();
+      ctx.moveTo(cx - 12, cy);
+      ctx.lineTo(cx + 12, cy);
+      ctx.moveTo(cx, cy - 12);
+      ctx.lineTo(cx, cy + 12);
+      ctx.stroke();
+      ctx.fillStyle = "#58b7ff";
+      for (const p of points || []) {
+        if (!p || p.length < 3) continue;
+        const x = cx + Number(p[1]) * scale;
+        const y = cy - Number(p[0]) * scale;
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        if (x < -4 || y < -4 || x > rect.width + 4 || y > rect.height + 4) continue;
+        ctx.fillRect(x, y, 2, 2);
+      }
+    }
+
+    window.addEventListener("resize", () => draw([]));
+    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+    ws.onopen = () => { statusEl.textContent = "connected"; };
+    ws.onclose = () => { statusEl.textContent = "disconnected"; };
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "status") {
+        statusEl.textContent = `${msg.status} lidar=${msg.lidar_messages}`;
+        detailEl.textContent = `age=${msg.lidar_age_s == null ? "none" : msg.lidar_age_s.toFixed(1) + "s"}`;
+      }
+      if (msg.type === "lidar") {
+        countEl.textContent = `${msg.point_count} / ${msg.source_point_count}`;
+        draw(msg.robot_points || []);
+      }
+    };
+    draw([]);
   </script>
 </body>
 </html>
