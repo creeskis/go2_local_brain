@@ -10,7 +10,7 @@ need() {
 
 need expect
 
-: "${GUN_ACTION:?set GUN_ACTION to START, STOP, or TEST}"
+: "${GUN_ACTION:?set GUN_ACTION to START, STOP, TEST, or STATUS}"
 : "${GUN_JETSON_PASSWORD:?set GUN_JETSON_PASSWORD in .env}"
 export GUN_JETSON_SUDO_PASSWORD="${GUN_JETSON_SUDO_PASSWORD:-$GUN_JETSON_PASSWORD}"
 
@@ -41,6 +41,9 @@ case "$GUN_ACTION" in
   TEST)
     REMOTE_COMMAND="echo \"\$(date -Is) TEST requested\" >> $REMOTE_LOG_Q; $CHMOD_USB && echo OK TEST"
     ;;
+  STATUS)
+    REMOTE_COMMAND="echo \"\$(date -Is) STATUS requested\" >> $REMOTE_LOG_Q; tty=0; [ -e /dev/ttyUSB0 ] && tty=1; active=0; pid=; if [ -f /tmp/go2_gun_fire.pid ]; then pid=\$(cat /tmp/go2_gun_fire.pid 2>/dev/null || true); if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then active=1; fi; fi; chmod_status=1; $CHMOD_USB >/dev/null 2>&1 && chmod_status=0; echo \"\$(date -Is) STATUS tty=\$tty active=\$active pid=\$pid chmod_status=\$chmod_status\" >> $REMOTE_LOG_Q; echo OK STATUS tty=\$tty active=\$active pid=\$pid chmod_status=\$chmod_status"
+    ;;
   *)
     echo "unknown GUN_ACTION: $GUN_ACTION" >&2
     exit 2
@@ -63,7 +66,7 @@ spawn ssh -p $env(GUN_LOCAL_SSH_PORT) -o StrictHostKeyChecking=accept-new $env(G
 expect {
   -re "(?i)password:" { send -- "$env(GUN_JETSON_PASSWORD)\r"; exp_continue }
   -re "(?i)sorry" { puts stderr "sudo password rejected"; exit 1 }
-  -re "OK (START|STOP|TEST)(\[^\r\n\]*)?" {
+  -re "OK (START|STOP|TEST|STATUS)(\[^\r\n\]*)?" {
     puts $expect_out(0,string)
     exit 0
   }

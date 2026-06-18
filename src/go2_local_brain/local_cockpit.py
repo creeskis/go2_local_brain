@@ -21,7 +21,8 @@ from .gun_relay import GunRelay, gun_relay_config_from_env
 log = logging.getLogger(__name__)
 
 _MOVE_DURATION_S = 0.16
-_FACE_INTERVAL_S = 0.20
+_FACE_INTERVAL_S = max(0.20, float(os.getenv("GO2_FACE_INTERVAL_S", "0.65")))
+_FACE_DETECT_MAX_WIDTH = max(160, int(os.getenv("GO2_FACE_DETECT_MAX_WIDTH", "640")))
 _DEFAULT_FACE_BACKEND = "face_recognition"
 
 
@@ -75,6 +76,7 @@ class LocalCockpit:
         app.router.add_post("/api/jump", self._jump_action)
         app.router.add_post("/api/gun/preconnect", self._gun_preconnect)
         app.router.add_post("/api/gun/test", self._gun_test)
+        app.router.add_post("/api/gun/status", self._gun_status)
         app.router.add_post("/api/gun/fire", self._gun_fire)
         app.router.add_post("/api/gun/stop", self._gun_stop)
         app.router.add_post("/api/face/enroll", self._face_enroll)
@@ -273,6 +275,15 @@ class LocalCockpit:
         self._last_result = f"gun relay test: {result}"
         return web.json_response({"ok": True, "result": self._last_result})
 
+    async def _gun_status(self, _request: web.Request) -> web.Response:
+        try:
+            result = await self._gun.status()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("gun status failed")
+            return web.json_response({"ok": False, "result": f"gun status failed: {exc}"}, status=400)
+        self._last_result = result
+        return web.json_response({"ok": True, "result": result, "gun": self._gun.snapshot()})
+
     async def _gun_fire(self, _request: web.Request) -> web.Response:
         try:
             result = await self._gun.fire()
@@ -308,6 +319,7 @@ class LocalCockpit:
             "face_error": self._face_error,
             "face_db": str(self._face_db_path),
             "gun_active": self._gun.active,
+            "gun": self._gun.snapshot(),
             "battery_percent": self._battery_percent,
         }
 
@@ -325,11 +337,21 @@ def _face_boxes(image: Any) -> list[tuple[int, int, int, int]]:
     except ImportError as exc:
         raise RuntimeError("opencv-python-headless is required for live FaceID boxes") from exc
 
-    arr = np.asarray(image.convert("RGB"))
+    source = image.convert("RGB")
+    width = max(1, int(getattr(source, "width", 1)))
+    height = max(1, int(getattr(source, "height", 1)))
+    scale = 1.0
+    if width > _FACE_DETECT_MAX_WIDTH:
+        scale = _FACE_DETECT_MAX_WIDTH / width
+        source = source.resize((int(width * scale), int(height * scale)))
+    arr = np.asarray(source)
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
     cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48))
-    return [(int(x), int(y), int(x + w), int(y + h)) for x, y, w, h in faces]
+    return [
+        (int(x / scale), int(y / scale), int((x + w) / scale), int((y + h) / scale))
+        for x, y, w, h in faces
+    ]
 
 
 def _extract_battery_percent(sport_state: Any) -> float | None:
@@ -375,70 +397,104 @@ _INDEX_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Go2 Local Cockpit</title>
+  <title>Go2 Cockpit</title>
   <style>
-    :root { color-scheme: dark; --bg:#0f1114; --panel:#171b20; --line:#303841; --text:#f4f7fa; --muted:#9aa6b2; --red:#e64a4a; --blue:#3c91e6; --green:#46b06b; }
+    :root { color-scheme: dark; --bg:#0b0d0f; --rail:#15191d; --panel:#1d2329; --panel2:#12161a; --line:#343d46; --text:#f3f5f7; --muted:#98a4ad; --red:#d84444; --red2:#7b2424; --blue:#2f7fc3; --green:#41a36c; --yellow:#d9b84f; }
     * { box-sizing:border-box; }
-    body { margin:0; height:100vh; overflow:hidden; background:var(--bg); color:var(--text); font:14px/1.35 system-ui, Segoe UI, sans-serif; }
-    main { height:100vh; display:grid; grid-template-columns:330px 1fr; }
-    aside { border-right:1px solid var(--line); background:var(--panel); padding:12px; overflow:auto; }
-    h1 { margin:0 0 8px; font-size:18px; }
+    html, body { margin:0; height:100%; overflow:hidden; background:var(--bg); color:var(--text); font:14px/1.35 Inter, ui-sans-serif, system-ui, Segoe UI, sans-serif; }
+    main { height:100vh; display:grid; grid-template-columns:360px minmax(0, 1fr); }
+    aside { border-right:1px solid var(--line); background:var(--rail); padding:14px; overflow:auto; }
+    header { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }
+    h1 { margin:0; font-size:19px; line-height:1.1; font-weight:750; }
     h2 { margin:18px 0 8px; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0; }
     button { min-height:38px; border:1px solid var(--line); border-radius:6px; background:#252c34; color:var(--text); font:inherit; cursor:pointer; }
-    button:hover { background:#303944; }
-    button:active { transform:translateY(1px); }
+    button:hover:not(:disabled) { background:#303944; }
+    button:active:not(:disabled) { transform:translateY(1px); }
+    button:disabled { cursor:not-allowed; opacity:.48; }
+    input { min-width:0; min-height:38px; border:1px solid var(--line); border-radius:6px; background:#0f1317; color:var(--text); padding:0 10px; font:inherit; }
     .grid3 { display:grid; grid-template-columns:repeat(3, 1fr); gap:7px; }
     .grid2 { display:grid; grid-template-columns:repeat(2, 1fr); gap:7px; }
+    .grid4 { display:grid; grid-template-columns:repeat(4, 1fr); gap:7px; }
     .wide { width:100%; }
     .stop { background:var(--red); border-color:#ff8787; font-weight:700; }
-    .fire { background:#842727; border-color:#e36b6b; font-weight:800; }
-    .pre { background:#284769; border-color:#4d8dcc; }
-    label { color:var(--muted); display:grid; gap:5px; margin:8px 0; }
+    .fire { background:var(--red2); border-color:#df6969; font-weight:800; }
+    .pre { background:#243d55; border-color:#4b89bc; }
+    .ok { background:#244733; border-color:#4c996c; }
+    label { color:var(--muted); display:grid; gap:5px; margin:9px 0; }
     input[type=range] { width:100%; }
-    .status { color:var(--muted); min-height:48px; white-space:pre-line; }
+    .pill { display:inline-flex; align-items:center; gap:7px; min-height:26px; padding:3px 9px; border:1px solid var(--line); border-radius:999px; background:#0f1317; color:var(--muted); font-size:12px; white-space:nowrap; }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); }
+    .dot.ready { background:var(--green); }
+    .dot.warn { background:var(--yellow); }
+    .dot.hot { background:var(--red); }
+    .status { min-height:66px; padding:10px; border:1px solid var(--line); border-radius:6px; background:var(--panel2); color:var(--muted); white-space:pre-line; overflow:hidden; }
+    .metrics { display:grid; grid-template-columns:repeat(3, 1fr); gap:7px; margin:10px 0 12px; }
+    .metric { border:1px solid var(--line); border-radius:6px; background:var(--panel2); padding:8px; min-width:0; }
+    .metric b { display:block; font-size:16px; line-height:1.1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .metric span { display:block; color:var(--muted); font-size:11px; margin-top:3px; }
+    .section { padding:10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); margin-top:10px; }
     .video { position:relative; min-width:0; min-height:0; background:#050607; display:flex; align-items:center; justify-content:center; overflow:hidden; }
     #video { width:100%; height:100%; object-fit:contain; display:block; }
     #overlay { position:absolute; inset:0; pointer-events:none; }
-    .box { position:absolute; border:2px solid #ffd447; box-shadow:0 0 0 1px rgba(0,0,0,.8); color:#111; font-size:12px; font-weight:800; }
-    .box span { background:#ffd447; padding:1px 4px; position:absolute; left:-2px; top:-20px; }
+    .box { position:absolute; border:2px solid #f1c94a; box-shadow:0 0 0 1px rgba(0,0,0,.8); color:#111; font-size:12px; font-weight:800; }
+    .box span { background:#f1c94a; padding:1px 4px; position:absolute; left:-2px; top:-20px; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .hint { color:var(--muted); font-size:12px; margin-top:8px; }
-    @media (max-width: 860px) { main { grid-template-columns:1fr; grid-template-rows:auto 1fr; } aside { border-right:0; border-bottom:1px solid var(--line); } }
+    .log { height:132px; overflow:auto; margin-top:8px; padding:8px; border:1px solid var(--line); border-radius:6px; background:#090b0d; color:#b8c0c7; font:11px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; white-space:pre-wrap; }
+    .kbd { font-weight:750; }
+    @media (max-width: 860px) { html, body { overflow:auto; } main { min-height:100vh; height:auto; grid-template-columns:1fr; grid-template-rows:auto 68vh; } aside { border-right:0; border-bottom:1px solid var(--line); } }
   </style>
 </head>
 <body>
   <main>
     <aside>
-      <h1>Go2 Local Cockpit</h1>
+      <header>
+        <div>
+          <h1>Go2 Cockpit</h1>
+          <div class="hint">local video, drive, Face ID, optional trigger</div>
+        </div>
+        <div class="pill"><span class="dot" id="stateDot"></span><span id="stateText">starting</span></div>
+      </header>
       <div class="status" id="status">starting</div>
+      <div class="metrics">
+        <div class="metric"><b id="batteryMetric">--</b><span>battery</span></div>
+        <div class="metric"><b id="framesMetric">0</b><span>frames</span></div>
+        <div class="metric"><b id="gunMetric">idle</b><span>trigger</span></div>
+      </div>
       <button class="stop wide" onclick="stopNow()">STOP</button>
 
-      <h2>WASD</h2>
-      <div class="grid3">
-        <span></span><button data-move="forward">W</button><span></span>
-        <button data-move="left">A</button><button onclick="stopNow()">Stop</button><button data-move="right">D</button>
-        <button data-move="turnLeft">Q</button><button data-move="back">S</button><button data-move="turnRight">E</button>
+      <div class="section">
+        <h2>Drive</h2>
+        <div class="grid3">
+          <span></span><button data-move="forward" class="kbd">W</button><span></span>
+          <button data-move="left" class="kbd">A</button><button onclick="stopNow()">Stop</button><button data-move="right" class="kbd">D</button>
+          <button data-move="turnLeft" class="kbd">Q</button><button data-move="back" class="kbd">S</button><button data-move="turnRight" class="kbd">E</button>
+        </div>
+        <button class="wide" onclick="jumpNow()">Jump</button>
+        <label>Speed <input id="speed" type="range" min="0.10" max="2.00" step="0.05" value="1.00"></label>
+        <label>Turn <input id="turn" type="range" min="0.20" max="2.50" step="0.05" value="1.25"></label>
+        <div class="hint">Left stick drives. Right stick turns. Space or Xbox A jumps.</div>
       </div>
-      <button class="wide" onclick="jumpNow()">Jump</button>
-      <label>Speed <input id="speed" type="range" min="0.10" max="2.00" step="0.05" value="1.00"></label>
-      <label>Turn <input id="turn" type="range" min="0.20" max="2.50" step="0.05" value="1.25"></label>
-      <div class="hint">Space = jump. Hold W/A/S/D/Q/E for smooth blended movement.</div>
 
-      <h2>USB Trigger</h2>
-      <div class="grid2">
-        <button class="pre" onclick="gunPreconnect()">Script Mode</button>
-        <button onclick="gunTest()">Test Script</button>
-        <button onclick="gunStop()">Stop Fire</button>
-        <button class="fire" onclick="gunFire()">Start Fire</button>
+      <div class="section">
+        <h2>USB Trigger</h2>
+        <div class="grid2">
+          <button class="pre" id="gunReadyBtn" onclick="gunPreconnect()">Connect</button>
+          <button id="gunStatusBtn" onclick="gunStatus()">Status</button>
+          <button id="gunStopBtn" onclick="gunStop()">Stop Fire</button>
+          <button class="fire" id="gunFireBtn" onclick="gunFire()">Start Fire</button>
+        </div>
+        <div class="hint">Optional relay. Right trigger starts fire. Xbox B stops fire. Release does not stop firing.</div>
+        <div class="log" id="gunLog">waiting for relay log</div>
       </div>
-      <div class="hint">Start Fire keeps the Jetson SSH session open and starts the USB command. Stop Fire sends Ctrl+C, chmods USB, then writes the stop byte.</div>
 
-      <h2>FaceID</h2>
-      <div class="hint" id="faceStatus">waiting</div>
-      <div class="grid2">
-        <button onclick="enrollFace()">Add Face To DB</button>
-        <input id="faceName" placeholder="face name" autocomplete="off">
+      <div class="section">
+        <h2>Face ID</h2>
+        <div class="grid2">
+          <button onclick="enrollFace()">Save Face</button>
+          <input id="faceName" placeholder="name" autocomplete="off">
+        </div>
+        <div class="hint" id="faceStatus">waiting</div>
       </div>
-      <div class="hint">Type a name, keep one face visible, then click Add Face To DB.</div>
     </aside>
     <section class="video" id="videoPanel">
       <img id="video" src="/video.mjpg" alt="Live robot video">
@@ -448,6 +504,16 @@ _INDEX_HTML = """<!doctype html>
   <script>
     const statusEl = document.getElementById("status");
     const faceStatus = document.getElementById("faceStatus");
+    const gunLogEl = document.getElementById("gunLog");
+    const stateDot = document.getElementById("stateDot");
+    const stateText = document.getElementById("stateText");
+    const batteryMetric = document.getElementById("batteryMetric");
+    const framesMetric = document.getElementById("framesMetric");
+    const gunMetric = document.getElementById("gunMetric");
+    const gunFireBtn = document.getElementById("gunFireBtn");
+    const gunStopBtn = document.getElementById("gunStopBtn");
+    const gunReadyBtn = document.getElementById("gunReadyBtn");
+    const gunStatusBtn = document.getElementById("gunStatusBtn");
     const active = new Set();
     let tick = null;
     let current = {vx:0, vy:0, vyaw:0};
@@ -456,6 +522,8 @@ _INDEX_HTML = """<!doctype html>
     let gamepadJumpDown = false;
     let gamepadStopDown = false;
     let latestFaces = [];
+    let lastStatus = null;
+    const gunBusyStates = new Set(["checking", "starting", "stopping"]);
 
     function speed() { return Number(document.getElementById("speed").value); }
     function turn() { return Number(document.getElementById("turn").value); }
@@ -463,6 +531,7 @@ _INDEX_HTML = """<!doctype html>
       const res = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
       const data = await res.json().catch(() => ({result:"bad response"}));
       if (data.result) statusEl.textContent = data.result;
+      if (data.gun) applyGunState(data.gun);
       if (!res.ok) throw new Error(data.result || "request failed");
       return data;
     }
@@ -489,7 +558,9 @@ _INDEX_HTML = """<!doctype html>
     }
     function pulseMove() {
       const body = smoothToward(vectorFromActive());
-      if (body.vx || body.vy || body.vyaw) api("/api/move", body).catch(() => {});
+      if (Math.abs(body.vx) > 0.01 || Math.abs(body.vy) > 0.01 || Math.abs(body.vyaw) > 0.01) {
+        api("/api/move", body).catch(() => {});
+      }
     }
     function hold(name) {
       active.add(name);
@@ -520,7 +591,11 @@ _INDEX_HTML = """<!doctype html>
       return api("/api/jump").catch(() => {});
     }
     const keyMap = {w:"forward", s:"back", a:"left", d:"right", q:"turnLeft", e:"turnRight"};
+    function isTyping(event) {
+      return ["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName);
+    }
     document.addEventListener("keydown", (e) => {
+      if (isTyping(e)) return;
       if (e.code === "Space" && !e.repeat) {
         e.preventDefault();
         jumpNow();
@@ -532,6 +607,7 @@ _INDEX_HTML = """<!doctype html>
       hold(name);
     });
     document.addEventListener("keyup", (e) => {
+      if (isTyping(e)) return;
       const name = keyMap[e.key.toLowerCase()];
       if (!name) return;
       e.preventDefault();
@@ -540,6 +616,7 @@ _INDEX_HTML = """<!doctype html>
 
     function gunPreconnect() { return api("/api/gun/preconnect").catch(() => {}); }
     function gunTest() { return api("/api/gun/test").catch(() => {}); }
+    function gunStatus() { return api("/api/gun/status").catch(() => {}); }
     function gunFire() { return api("/api/gun/fire").catch(() => {}); }
     function gunStop() { return api("/api/gun/stop").catch(() => {}); }
     function enrollFace() {
@@ -592,7 +669,7 @@ _INDEX_HTML = """<!doctype html>
       gamepadJumpDown = a;
 
       const b = Boolean(pad.buttons[1]?.pressed);
-      if (b && !gamepadStopDown) stopNow();
+      if (b && !gamepadStopDown) gunStop();
       gamepadStopDown = b;
 
       requestAnimationFrame(pollGamepad);
@@ -631,13 +708,32 @@ _INDEX_HTML = """<!doctype html>
         box.innerHTML = `<span>${face.label || "face"}${score}</span>`;
         overlay.appendChild(box);
       });
-      faceStatus.textContent = `${data.face_backend || "none"} faces=${faces.length} db=${data.face_db || ""}${data.face_error ? " error=" + data.face_error : ""}`;
+      const names = faces.map((face) => face.label || "face").join(", ");
+      faceStatus.textContent = `${faces.length} visible${names ? ": " + names : ""}${data.face_error ? " / " + data.face_error : ""}`;
+    }
+    function applyGunState(gun) {
+      const state = gun?.state || (gun?.active ? "firing" : "idle");
+      const busy = gunBusyStates.has(state);
+      gunMetric.textContent = state;
+      gunFireBtn.disabled = busy || state === "firing";
+      gunStopBtn.disabled = state === "stopping";
+      gunReadyBtn.disabled = busy;
+      gunStatusBtn.disabled = busy;
+      gunLogEl.textContent = (gun?.log_tail || []).join("\\n") || "no relay log yet";
     }
     async function refreshStatus() {
       const res = await fetch("/status.json");
       const data = await res.json();
+      lastStatus = data;
       const battery = data.battery_percent == null ? "unknown" : `${data.battery_percent}%`;
-      statusEl.textContent = `${data.status} video=${data.video_frames} battery=${battery} gun=${data.gun_active ? "active" : "idle"}\\n${data.last_result || ""}`;
+      const gun = data.gun || {};
+      const gunState = gun.state || (data.gun_active ? "firing" : "idle");
+      stateText.textContent = data.status || "unknown";
+      stateDot.className = `dot ${data.status === "connected" ? "ready" : data.status === "starting" || data.status === "connecting" ? "warn" : "hot"}`;
+      batteryMetric.textContent = battery;
+      framesMetric.textContent = String(data.video_frames || 0);
+      statusEl.textContent = `${data.status} / gun ${gunState}\\n${data.last_result || gun.last_result || ""}${gun.last_error ? "\\n" + gun.last_error : ""}`;
+      applyGunState(gun);
       drawFaces(data);
     }
     setInterval(refreshStatus, 400);

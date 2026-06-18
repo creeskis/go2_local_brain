@@ -6,6 +6,8 @@ import asyncio
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import time
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -34,39 +36,83 @@ class GunRelay:
         self._repo_root = Path(__file__).resolve().parents[2]
         self._tunnel: asyncio.subprocess.Process | None = None
         self._active = False
+        self._state = "idle"
+        self._last_result = ""
+        self._last_error = ""
+        self._last_action_ts = 0.0
         self._lock = asyncio.Lock()
 
     @property
     def active(self) -> bool:
         return self._active
 
+    @property
+    def state(self) -> str:
+        return self._state
+
     async def preconnect(self) -> str:
-        await self._ensure_tunnel()
-        return "gun SSH tunnel ready"
+        try:
+            await self._ensure_tunnel()
+            return self._remember("ready", "gun SSH tunnel ready")
+        except Exception as exc:
+            self._remember_error("error", str(exc))
+            raise
 
     async def test(self) -> str:
         async with self._lock:
-            await self._ensure_tunnel_locked()
-            return await self._run_command("TEST")
+            self._state = "checking"
+            try:
+                await self._ensure_tunnel_locked()
+                result = await self._run_command("TEST")
+            except Exception as exc:
+                self._remember_error("error", str(exc))
+                raise
+            return self._remember("ready" if not self._active else "firing", result)
+
+    async def status(self) -> str:
+        async with self._lock:
+            self._state = "checking"
+            try:
+                await self._ensure_tunnel_locked()
+                result = await self._run_command("STATUS")
+            except Exception as exc:
+                self._remember_error("error", str(exc))
+                raise
+            self._active = "active=1" in result
+            return self._remember("firing" if self._active else "ready", result)
 
     async def fire(self) -> str:
         async with self._lock:
-            await self._ensure_tunnel_locked()
-            result = await self._run_command("START")
+            if self._active:
+                return self._remember("firing", self._last_result or "gun already firing")
+            self._state = "starting"
+            try:
+                await self._ensure_tunnel_locked()
+                result = await self._run_command("START")
+            except Exception as exc:
+                self._active = False
+                self._remember_error("error", str(exc))
+                raise
             self._active = True
-            return result
+            return self._remember("firing", result)
 
     async def stop(self) -> str:
         async with self._lock:
-            await self._ensure_tunnel_locked()
-            result = await self._run_command("STOP")
+            self._state = "stopping"
+            try:
+                await self._ensure_tunnel_locked()
+                result = await self._run_command("STOP")
+            except Exception as exc:
+                self._remember_error("error", str(exc))
+                raise
             self._active = False
-            return result
+            return self._remember("ready", result)
 
     async def close(self) -> None:
         async with self._lock:
             proc = self._tunnel
             self._active = False
+            self._state = "idle"
             if proc is None or proc.returncode is not None:
                 self._tunnel = None
                 return
@@ -77,6 +123,20 @@ class GunRelay:
                 proc.kill()
                 await proc.wait()
             self._tunnel = None
+
+    def snapshot(self) -> dict[str, Any]:
+        tunnel_alive = self._tunnel is not None and self._tunnel.returncode is None
+        return {
+            "active": self._active,
+            "state": self._state,
+            "tunnel_alive": tunnel_alive,
+            "last_result": self._last_result,
+            "last_error": self._last_error,
+            "last_action_ts": self._last_action_ts,
+            "log_file": self._cfg.log_file,
+            "remote_log_file": self._cfg.remote_log_file,
+            "log_tail": self._tail_log(self._cfg.log_file),
+        }
 
     async def _ensure_tunnel(self) -> None:
         async with self._lock:
@@ -138,6 +198,30 @@ class GunRelay:
             detail = "; ".join(part for part in (err, out, f"exit {proc.returncode}") if part)
             raise RuntimeError(detail)
         return out or f"OK {action}"
+
+    def _remember(self, state: str, result: str) -> str:
+        self._state = state
+        self._last_result = result
+        self._last_error = ""
+        self._last_action_ts = time.time()
+        return result
+
+    def _remember_error(self, state: str, error: str) -> None:
+        self._state = state
+        self._last_error = error
+        self._last_result = error
+        self._last_action_ts = time.time()
+
+    def _tail_log(self, log_file: str, *, max_lines: int = 12) -> list[str]:
+        try:
+            path = Path(log_file).expanduser()
+            if not path.exists() or not path.is_file():
+                return []
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.readlines()[-max_lines:]
+            return [line.rstrip() for line in lines]
+        except OSError as exc:
+            return [f"log unavailable: {exc}"]
 
     async def _tunnel_error(self) -> str:
         proc = self._tunnel
