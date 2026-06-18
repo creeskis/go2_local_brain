@@ -33,16 +33,16 @@ CHMOD_USB="printf '%s\n' $SUDO_PASS_Q | sudo -S chmod 666 /dev/ttyUSB0"
 
 case "$GUN_ACTION" in
   START)
-    REMOTE_COMMAND="echo \"\$(date -Is) START requested\" >> $REMOTE_LOG_Q; if [ -f /tmp/go2_gun_fire.pid ] && kill -0 \$(cat /tmp/go2_gun_fire.pid) 2>/dev/null; then echo \"\$(date -Is) START already active pid=\$(cat /tmp/go2_gun_fire.pid)\" >> $REMOTE_LOG_Q; echo OK START already-active pid=\$(cat /tmp/go2_gun_fire.pid); else rm -f /tmp/go2_gun_fire.pid; $CHMOD_USB && { nohup setsid bash -lc $FIRE_COMMAND_Q </dev/null >/tmp/go2_gun_fire.log 2>&1 & pid=\$!; echo \$pid > /tmp/go2_gun_fire.pid; echo \"\$(date -Is) START pid=\$pid\" >> $REMOTE_LOG_Q; echo OK START pid=\$pid; }; fi"
+    REMOTE_COMMAND="echo \"\$(date -Is) START requested user=\$(whoami)\" >> $REMOTE_LOG_Q; if [ ! -e /dev/ttyUSB0 ]; then echo \"\$(date -Is) START missing /dev/ttyUSB0\" >> $REMOTE_LOG_Q; echo ERR START missing-ttyUSB0; exit 10; fi; if [ -f /tmp/go2_gun_fire.pid ]; then oldpid=\$(cat /tmp/go2_gun_fire.pid 2>/dev/null || true); if [ -n \"\$oldpid\" ] && kill -0 \"\$oldpid\" 2>/dev/null; then echo \"\$(date -Is) START already active pid=\$oldpid\" >> $REMOTE_LOG_Q; echo OK START already-active pid=\$oldpid; exit 0; fi; echo \"\$(date -Is) START removing stale pid=\$oldpid\" >> $REMOTE_LOG_Q; rm -f /tmp/go2_gun_fire.pid; fi; eval \"$CHMOD_USB\"; chmod_status=\$?; if [ \"\$chmod_status\" -ne 0 ]; then echo \"\$(date -Is) START chmod failed status=\$chmod_status dev=\$(ls -l /dev/ttyUSB0 2>&1)\" >> $REMOTE_LOG_Q; echo ERR START chmod-failed status=\$chmod_status; exit \$chmod_status; fi; nohup setsid bash -lc $FIRE_COMMAND_Q </dev/null >/tmp/go2_gun_fire.log 2>&1 & pid=\$!; sleep 0.2; if ! kill -0 \"\$pid\" 2>/dev/null; then echo \"\$(date -Is) START command exited pid=\$pid log=\$(tail -n 20 /tmp/go2_gun_fire.log 2>&1 | tr '\\n' '|')\" >> $REMOTE_LOG_Q; echo ERR START command-exited pid=\$pid; exit 11; fi; echo \$pid > /tmp/go2_gun_fire.pid; echo \"\$(date -Is) START pid=\$pid dev=\$(ls -l /dev/ttyUSB0 2>&1)\" >> $REMOTE_LOG_Q; echo OK START pid=\$pid"
     ;;
   STOP)
-    REMOTE_COMMAND="echo \"\$(date -Is) STOP requested\" >> $REMOTE_LOG_Q; if [ -f /tmp/go2_gun_fire.pid ]; then pid=\$(cat /tmp/go2_gun_fire.pid); echo \"\$(date -Is) STOP pid=\$pid\" >> $REMOTE_LOG_Q; kill -INT -\$pid 2>/dev/null || kill -INT \$pid 2>/dev/null || true; sleep 0.3; kill -TERM -\$pid 2>/dev/null || kill -TERM \$pid 2>/dev/null || true; sleep 0.2; kill -KILL -\$pid 2>/dev/null || kill -KILL \$pid 2>/dev/null || true; rm -f /tmp/go2_gun_fire.pid; else echo \"\$(date -Is) STOP no pid file\" >> $REMOTE_LOG_Q; fi; $CHMOD_USB && bash -lc $STOP_COMMAND_Q; status=\$?; echo \"\$(date -Is) STOP stop_command_status=\$status\" >> $REMOTE_LOG_Q; echo OK STOP status=\$status; exit 0"
+    REMOTE_COMMAND="echo \"\$(date -Is) STOP requested user=\$(whoami)\" >> $REMOTE_LOG_Q; if [ -f /tmp/go2_gun_fire.pid ]; then pid=\$(cat /tmp/go2_gun_fire.pid 2>/dev/null || true); echo \"\$(date -Is) STOP pid=\$pid\" >> $REMOTE_LOG_Q; if [ -n \"\$pid\" ]; then kill -INT -\$pid 2>/dev/null || kill -INT \$pid 2>/dev/null || true; sleep 0.3; kill -TERM -\$pid 2>/dev/null || kill -TERM \$pid 2>/dev/null || true; sleep 0.2; kill -KILL -\$pid 2>/dev/null || kill -KILL \$pid 2>/dev/null || true; fi; rm -f /tmp/go2_gun_fire.pid; else echo \"\$(date -Is) STOP no pid file\" >> $REMOTE_LOG_Q; fi; if [ ! -e /dev/ttyUSB0 ]; then echo \"\$(date -Is) STOP missing /dev/ttyUSB0\" >> $REMOTE_LOG_Q; echo ERR STOP missing-ttyUSB0; exit 10; fi; eval \"$CHMOD_USB\"; chmod_status=\$?; if [ \"\$chmod_status\" -ne 0 ]; then echo \"\$(date -Is) STOP chmod failed status=\$chmod_status dev=\$(ls -l /dev/ttyUSB0 2>&1)\" >> $REMOTE_LOG_Q; echo ERR STOP chmod-failed status=\$chmod_status; exit \$chmod_status; fi; bash -lc $STOP_COMMAND_Q; status=\$?; echo \"\$(date -Is) STOP stop_command_status=\$status\" >> $REMOTE_LOG_Q; if [ \"\$status\" = 0 ]; then echo OK STOP status=\$status; else echo ERR STOP status=\$status; fi; exit \$status"
     ;;
   TEST)
-    REMOTE_COMMAND="echo \"\$(date -Is) TEST requested\" >> $REMOTE_LOG_Q; $CHMOD_USB && echo OK TEST"
+    REMOTE_COMMAND="echo \"\$(date -Is) TEST requested\" >> $REMOTE_LOG_Q; if [ ! -e /dev/ttyUSB0 ]; then echo ERR TEST missing-ttyUSB0; exit 10; fi; eval \"$CHMOD_USB\" && echo OK TEST"
     ;;
   STATUS)
-    REMOTE_COMMAND="echo \"\$(date -Is) STATUS requested\" >> $REMOTE_LOG_Q; tty=0; [ -e /dev/ttyUSB0 ] && tty=1; active=0; pid=; if [ -f /tmp/go2_gun_fire.pid ]; then pid=\$(cat /tmp/go2_gun_fire.pid 2>/dev/null || true); if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then active=1; fi; fi; chmod_status=1; $CHMOD_USB >/dev/null 2>&1 && chmod_status=0; echo \"\$(date -Is) STATUS tty=\$tty active=\$active pid=\$pid chmod_status=\$chmod_status\" >> $REMOTE_LOG_Q; echo OK STATUS tty=\$tty active=\$active pid=\$pid chmod_status=\$chmod_status"
+    REMOTE_COMMAND="echo \"\$(date -Is) STATUS requested\" >> $REMOTE_LOG_Q; tty=0; [ -e /dev/ttyUSB0 ] && tty=1; active=0; pid=; if [ -f /tmp/go2_gun_fire.pid ]; then pid=\$(cat /tmp/go2_gun_fire.pid 2>/dev/null || true); if [ -n \"\$pid\" ] && kill -0 \"\$pid\" 2>/dev/null; then active=1; fi; fi; chmod_status=1; eval \"$CHMOD_USB\" >/dev/null 2>&1 && chmod_status=0; echo \"\$(date -Is) STATUS tty=\$tty active=\$active pid=\$pid chmod_status=\$chmod_status\" >> $REMOTE_LOG_Q; echo OK STATUS tty=\$tty active=\$active pid=\$pid chmod_status=\$chmod_status"
     ;;
   *)
     echo "unknown GUN_ACTION: $GUN_ACTION" >&2
@@ -69,6 +69,10 @@ expect {
   -re "OK (START|STOP|TEST|STATUS)(\[^\r\n\]*)?" {
     puts $expect_out(0,string)
     exit 0
+  }
+  -re "ERR (START|STOP|TEST|STATUS)(\[^\r\n\]*)?" {
+    puts stderr $expect_out(0,string)
+    exit 1
   }
   timeout { puts stderr "timed out running $env(GUN_ACTION)"; exit 124 }
   eof { puts stderr "ssh command exited before OK $env(GUN_ACTION)"; exit 1 }
