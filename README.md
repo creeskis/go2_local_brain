@@ -88,6 +88,31 @@ Use this for:
 - Motion buttons
 - Optional host-side trigger controls
 
+### Home Simulation Cockpit
+
+Use this away from the work computer when the dog and Jetson are not
+available. It runs the same browser controls against a fake robot, simulated
+gun relay, and either the host webcam or generated video.
+
+```bash
+cd ~/robotics/go2_local_brain
+source .venv/bin/activate
+./scripts/run_sim_cockpit.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:8785
+```
+
+Useful switches:
+
+```bash
+GO2_SIM_CAMERA=-1 ./scripts/run_sim_cockpit.sh   # generated video only
+GO2_SIM_CAMERA=0 ./scripts/run_sim_cockpit.sh    # host webcam
+```
+
 ### WASD + LiDAR Demo
 
 ```bash
@@ -227,6 +252,7 @@ bash -n scripts/*.sh
 | Script | URL | Purpose |
 | --- | --- | --- |
 | `./scripts/run_local_cockpit.sh` | `http://127.0.0.1:8775` | Main operator cockpit |
+| `./scripts/run_sim_cockpit.sh` | `http://127.0.0.1:8785` | Home simulation cockpit |
 | `./scripts/run_wasd_lidar.sh` | `http://127.0.0.1:8774` | WASD + LiDAR demo |
 | `./scripts/run_lidar_viewer.sh` | `http://127.0.0.1:8765` | Separate LiDAR viewer |
 | `./scripts/run_ai_demo.sh` | `http://127.0.0.1:8778` | AI + WASD + LiDAR demo |
