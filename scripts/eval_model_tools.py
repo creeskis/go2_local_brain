@@ -7,8 +7,8 @@ exactly one known tool with conservative, finite arguments.
 
 Examples:
 
-    python scripts/eval_model_tools.py --model qwen3:1.7b
-    python scripts/eval_model_tools.py --model gemma4:e2b
+    python scripts/eval_model_tools.py --model qwen2.5:0.5b
+    python scripts/eval_model_tools.py --model qwen2.5:1.5b
     python scripts/eval_model_tools.py --model llama3.2:1b
     python scripts/eval_model_tools.py --model llama3.2
     python scripts/eval_model_tools.py --model phi4-mini
@@ -141,7 +141,7 @@ async def main_async(model: str) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate Ollama tool-calling for Go2 prompts")
-    parser.add_argument("--model", required=True, help="Ollama model tag, e.g. llama3.2:1b")
+    parser.add_argument("--model", default="qwen2.5:0.5b", help="Ollama model tag, e.g. qwen2.5:0.5b")
     args = parser.parse_args()
     raise SystemExit(asyncio.run(main_async(args.model)))
 

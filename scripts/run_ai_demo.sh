@@ -37,6 +37,7 @@ export GO2_WEBRTC_METHOD="${GO2_WEBRTC_METHOD:-LocalSTA}"
 export GO2_AES_128_KEY="${GO2_AES_128_KEY:-}"
 export FORCE_MOTION_MODE="${FORCE_MOTION_MODE:-normal}"
 export OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
+export OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5:0.5b}"
 
 OLLAMA_PID=""
 
@@ -60,6 +61,9 @@ if command -v ollama >/dev/null 2>&1; then
       curl -fsS --max-time 1 "$ollama_url" >/dev/null 2>&1 && break
       sleep 0.25
     done
+  fi
+  if [[ "${GO2_AI_AUTO_PULL:-0}" == "1" ]]; then
+    ollama pull "$OLLAMA_MODEL"
   fi
 else
   echo "warning: ollama not found; AI commands will fail until ollama is installed" >&2

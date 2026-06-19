@@ -6,3 +6,4 @@ build/
 dist/
 .env
 .commit_msg.txt
+outputs/

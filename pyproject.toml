@@ -22,6 +22,9 @@ vision = [
     "ultralytics",
     "opencv-python-headless",
 ]
+webcam = [
+    "opencv-python",
+]
 audio = [
     "sounddevice",
     "numpy",

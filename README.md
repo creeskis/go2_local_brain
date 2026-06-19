@@ -17,6 +17,8 @@ pip install -e .
 Optional Face ID backend on CPU:
 
 ```bash
+pip install opencv-python-headless
+# optional identity enrollment; heavier:
 pip install face_recognition
 ```
 
@@ -36,6 +38,7 @@ GO2_FACE_ENABLED=1
 GO2_FACE_INTERVAL_S=1.25
 GO2_FACE_DETECT_MAX_WIDTH=360
 GO2_JPEG_QUALITY=68
+OLLAMA_MODEL=qwen2.5:0.5b
 ```
 
 If `192.168.123.121` does not work for video/control, try the dog Ethernet IP
@@ -136,6 +139,33 @@ http://127.0.0.1:8778
 Use this for the AI demo segment. The script checks `OLLAMA_HOST`, starts
 `ollama serve` only if needed, and stops only the Ollama process it started
 when the script exits.
+
+Tiny model check:
+
+```bash
+OLLAMA_MODEL=qwen2.5:0.5b GO2_AI_AUTO_PULL=1 ./scripts/run_ai_demo.sh
+python scripts/eval_model_tools.py
+```
+
+If `0.5b` is too weak for tool calls, try `qwen2.5:1.5b` before moving to
+larger models.
+
+### Webcam Face ID Test
+
+Use this on the host computer when the dog is not available:
+
+```bash
+pip install opencv-python
+python scripts/webcam_faceid_test.py --seconds 8
+```
+
+That tests lightweight face boxes only. Identity enrollment needs the heavier
+backend:
+
+```bash
+pip install face_recognition
+python scripts/webcam_faceid_test.py --backend face_recognition --label Cooper --seconds 8
+```
 
 ### Old AI / Autonomy Cockpit
 
