@@ -1,0 +1,32 @@
+[Unit]
+Description=go2_local_brain autonomous LiDAR patrol (headless, no GUI/LLM)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO@
+Environment=HOME=@HOME@
+Environment=PYTHONUNBUFFERED=1
+# SAFE DEFAULT: dry run (connect + log decisions, no motion). The installer /
+# deploy script writes GO2_PATROL_ENABLE=1 into env.local for live patrol, which
+# overrides this because the EnvironmentFiles below are loaded after it.
+Environment=GO2_PATROL_ENABLE=0
+EnvironmentFile=-@REPO@/.env
+EnvironmentFile=-@HOME@/.go2/env.local
+# Pin Jetson clocks to max for consistent control latency. The leading '+' runs
+# this ExecStartPre as root regardless of User=; the script no-ops off-Jetson.
+ExecStartPre=+@REPO@/scripts/jetson_perf.sh
+ExecStart=@VENV@/bin/python -m go2_local_brain.patrol_agent
+# systemd sends SIGTERM on stop; the agent catches it, stops the robot, and the
+# driver deadman also halts motion if the loop ever stalls.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
