@@ -16,6 +16,8 @@ from aiohttp import web
 from .config import load_config
 from .autonomy.face_id import FaceDatabase, FaceIdentifier, NullFaceEmbedder, UNKNOWN_LABEL, build_face_embedder
 from .autonomy.face_detection import FaceDetector, build_face_detector
+from .autonomy.follow import HumanFollowController
+from .autonomy.perception import Observation, PerceptionHealth, YoloPerceptionProvider, detection_to_dict
 from .driver.webrtc_client import Go2Config, Go2WebRTCClient
 from .gun_relay import GunRelay, gun_relay_config_from_env
 
@@ -23,11 +25,17 @@ log = logging.getLogger(__name__)
 
 _MOVE_DURATION_S = 0.20
 _FACE_ENABLED = os.getenv("GO2_FACE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
-_FACE_INTERVAL_S = max(0.50, float(os.getenv("GO2_FACE_INTERVAL_S", "1.25")))
+_FACE_INTERVAL_S = max(0.10, float(os.getenv("GO2_FACE_INTERVAL_S", "1.25")))
 _FACE_DETECT_MAX_WIDTH = max(160, int(os.getenv("GO2_FACE_DETECT_MAX_WIDTH", "360")))
+_FACE_MAX_RESULTS = max(2, int(os.getenv("GO2_FACE_MAX_RESULTS", "16")))
 _DEFAULT_FACE_BACKEND = "face_recognition"
 _JPEG_QUALITY = min(90, max(35, int(os.getenv("GO2_JPEG_QUALITY", "68"))))
 _FACE_CASCADE: Any | None = None
+_FOLLOW_ENABLED = os.getenv("GO2_FOLLOW_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+_FOLLOW_MODEL = os.getenv("GO2_FOLLOW_YOLO_MODEL", "yolov8n.pt")
+_FOLLOW_THRESHOLD = float(os.getenv("GO2_FOLLOW_YOLO_THRESHOLD", "0.38"))
+_FOLLOW_DEVICE = os.getenv("GO2_FOLLOW_YOLO_DEVICE", "").strip() or None
+_FOLLOW_INTERVAL_S = max(0.10, float(os.getenv("GO2_FOLLOW_INTERVAL_S", "0.25")))
 
 
 class LocalCockpit:
@@ -58,6 +66,13 @@ class LocalCockpit:
         self._face_task: asyncio.Task[tuple[list[dict[str, Any]], Any]] | None = None
         self._battery_percent: float | None = None
         self._available_sport_commands: list[str] = []
+        self._perception: YoloPerceptionProvider | None = None
+        self._perception_health = PerceptionHealth(False, "not-started", "waiting for video")
+        self._latest_observation = Observation(timestamp=0.0, frame_available=False, note="waiting for video")
+        self._perception_task: asyncio.Task[None] | None = None
+        self._follow: HumanFollowController | None = None
+        self._follow_task: asyncio.Task[None] | None = None
+        self._follow_last_action = "idle"
 
     async def run(self) -> None:
         cfg = load_config()
@@ -90,6 +105,7 @@ class LocalCockpit:
         app.router.add_post("/api/gun/fire", self._gun_fire)
         app.router.add_post("/api/gun/stop", self._gun_stop)
         app.router.add_post("/api/face/enroll", self._face_enroll)
+        app.router.add_post("/api/follow/{action}", self._follow_action)
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -112,9 +128,31 @@ class LocalCockpit:
         await self._client.connect()
         self._available_sport_commands = self._client.available_sport_commands()
         self._attach_video()
+        if _FOLLOW_ENABLED:
+            self._perception = YoloPerceptionProvider(
+                lambda: self._latest_jpeg,
+                model_name=_FOLLOW_MODEL,
+                threshold=_FOLLOW_THRESHOLD,
+                device=_FOLLOW_DEVICE,
+            )
+            self._follow = HumanFollowController(
+                self._client,
+                target_height=float(os.getenv("GO2_FOLLOW_TARGET_HEIGHT", "0.45")),
+                max_forward=float(os.getenv("GO2_FOLLOW_MAX_FORWARD", "0.30")),
+                max_turn=float(os.getenv("GO2_FOLLOW_MAX_TURN", "0.45")),
+                duration_s=float(os.getenv("GO2_FOLLOW_MOVE_DURATION", "0.28")),
+            )
+            self._perception_task = asyncio.create_task(self._perception_loop(), name="go2-local-person-detection")
         self._status = "connected"
 
     async def _shutdown(self) -> None:
+        await self._stop_follow()
+        if self._perception_task is not None:
+            self._perception_task.cancel()
+            try:
+                await self._perception_task
+            except asyncio.CancelledError:
+                pass
         if self._face_task is not None:
             self._face_task.cancel()
         if self._client is not None:
@@ -179,7 +217,7 @@ class LocalCockpit:
                     "score": face.score,
                     "known": face.label != UNKNOWN_LABEL,
                 }
-                for face in identified[:8]
+                for face in identified[:_FACE_MAX_RESULTS]
             ]
         except Exception as exc:  # noqa: BLE001
             self._face_error = str(exc)
@@ -234,6 +272,7 @@ class LocalCockpit:
         if self._client is None:
             return web.json_response({"ok": False, "result": "robot is not connected"}, status=503)
         payload = await _json_or_empty(request)
+        await self._stop_follow(stop_robot=False)
         try:
             vx = float(payload.get("vx", 0.0))
             vy = float(payload.get("vy", 0.0))
@@ -279,6 +318,7 @@ class LocalCockpit:
         return web.json_response({"ok": True, "result": f"enrolled {label} -> {path}"})
 
     async def _stop_action(self, _request: web.Request) -> web.Response:
+        await self._stop_follow(stop_robot=False)
         await self._safe_stop()
         self._last_result = "stop"
         return web.json_response({"ok": True, "result": "stop"})
@@ -287,6 +327,7 @@ class LocalCockpit:
         if self._client is None:
             return web.json_response({"ok": False, "result": "robot is not connected"}, status=503)
         try:
+            await self._stop_follow(stop_robot=False)
             await self._client.advanced_action("jump")
         except Exception as exc:  # noqa: BLE001
             log.exception("jump failed")
@@ -306,6 +347,7 @@ class LocalCockpit:
         if parameter is not None and not isinstance(parameter, dict):
             return web.json_response({"ok": False, "result": "sport parameter must be an object"}, status=400)
         try:
+            await self._stop_follow(stop_robot=False)
             await self._client.sport_command(name, parameter)
         except Exception as exc:  # noqa: BLE001
             log.exception("sport command failed: %s", name)
@@ -362,9 +404,90 @@ class LocalCockpit:
         if self._client is not None:
             await self._client.stop()
 
+    async def _perception_loop(self) -> None:
+        assert self._perception is not None
+        while True:
+            try:
+                self._perception_health = await self._perception.health()
+                self._latest_observation = await self._perception.observe()
+            except Exception as exc:  # noqa: BLE001
+                log.exception("person perception failed")
+                self._perception_health = PerceptionHealth(False, "yolo", str(exc))
+                self._latest_observation = Observation(
+                    timestamp=time.time(),
+                    frame_available=self._latest_jpeg is not None,
+                    note=str(exc),
+                )
+            await asyncio.sleep(_FOLLOW_INTERVAL_S)
+
+    async def _follow_action(self, request: web.Request) -> web.Response:
+        action = request.match_info["action"]
+        if action == "start":
+            if self._follow is None or self._perception is None:
+                return web.json_response({"ok": False, "result": "person follow is disabled"}, status=503)
+            if not self._perception_health.ready:
+                return web.json_response(
+                    {"ok": False, "result": f"person detector not ready: {self._perception_health.detail}"},
+                    status=503,
+                )
+            if self._follow_task is None or self._follow_task.done():
+                self._follow_task = asyncio.create_task(self._follow_loop(), name="go2-local-human-follow")
+            self._follow_last_action = "started"
+            return web.json_response({"ok": True, "result": "person follow started"})
+        if action == "stop":
+            await self._stop_follow()
+            return web.json_response({"ok": True, "result": "person follow stopped"})
+        if action == "step":
+            await self._follow_step()
+            return web.json_response({"ok": True, "result": self._follow_last_action})
+        return web.json_response({"ok": False, "result": f"unknown follow action {action!r}"}, status=400)
+
+    async def _follow_loop(self) -> None:
+        while True:
+            await self._follow_step()
+            await asyncio.sleep(_FOLLOW_INTERVAL_S)
+
+    async def _follow_step(self) -> None:
+        if self._follow is None:
+            self._follow_last_action = "not ready"
+            return
+        command = await self._follow.step(self._latest_observation)
+        self._follow_last_action = command.reason
+
+    async def _stop_follow(self, *, stop_robot: bool = True) -> None:
+        task = self._follow_task
+        self._follow_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if stop_robot and task is not None:
+            await self._safe_stop()
+        if task is not None:
+            self._follow_last_action = "stopped"
+
     def _status_payload(self) -> dict[str, Any]:
         sport_state = getattr(self._client, "_sport_state", {}) if self._client is not None else {}
         self._battery_percent = _extract_battery_percent(sport_state)
+        people = []
+        for detection in self._latest_observation.detections:
+            if not detection.is_human():
+                continue
+            payload = detection_to_dict(
+                detection,
+                self._latest_observation.frame_width,
+                self._latest_observation.frame_height,
+            )
+            box = payload.get("box")
+            if isinstance(box, dict):
+                people.append(
+                    {
+                        "x": box["left"], "y": box["top"], "w": box["width"], "h": box["height"],
+                        "label": "person", "score": detection.confidence,
+                    }
+                )
         return {
             "status": self._status,
             "video_frames": self._video_frames,
@@ -375,6 +498,15 @@ class LocalCockpit:
             "face_detector": self._face_detector_name,
             "face_error": self._face_error,
             "face_db": str(self._face_db_path),
+            "people": people,
+            "person_detector": self._perception_health.__dict__,
+            "follow": {
+                "enabled": _FOLLOW_ENABLED,
+                "active": self._follow_task is not None and not self._follow_task.done(),
+                "last_action": self._follow_last_action,
+                "last_target": self._follow.last_target if self._follow is not None else "none",
+                "last_command": self._follow.last_command.__dict__ if self._follow is not None else None,
+            },
             "sport_commands": self._available_sport_commands,
             "gun_active": self._gun.active,
             "gun": self._gun.snapshot(),
@@ -507,6 +639,10 @@ _INDEX_HTML = """<!doctype html>
     .box { position:absolute; border:2px solid #f1c94a; box-shadow:0 0 0 1px rgba(0,0,0,.8); color:#111; font-size:12px; font-weight:800; transition:left .24s linear, top .24s linear, width .24s linear, height .24s linear, opacity .18s ease; will-change:left,top,width,height; }
     .box.known { border-color:#55d98a; }
     .box.known span { background:#55d98a; }
+    .box.person { border-color:#50a7ff; box-shadow:0 0 0 1px rgba(0,0,0,.8), 0 0 14px rgba(80,167,255,.32); }
+    .box.person span { background:#50a7ff; }
+    .box.face-selectable { pointer-events:auto; cursor:pointer; }
+    .box.selected { outline:3px solid #fff; outline-offset:3px; }
     .box span { background:#f1c94a; padding:1px 4px; position:absolute; left:-2px; top:-20px; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .hint { color:var(--muted); font-size:12px; margin-top:8px; }
     .log { height:132px; overflow:auto; margin-top:8px; padding:8px; border:1px solid var(--line); border-radius:6px; background:#090b0d; color:#b8c0c7; font:11px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; white-space:pre-wrap; }
@@ -587,6 +723,16 @@ _INDEX_HTML = """<!doctype html>
         </div>
         <div class="hint" id="faceStatus">waiting</div>
       </div>
+
+      <div class="section">
+        <h2>Person Follow</h2>
+        <div class="grid2">
+          <button class="ok" onclick="followPerson('start')">Start Follow</button>
+          <button class="stop" onclick="followPerson('stop')">Stop Follow</button>
+        </div>
+        <button class="wide" onclick="followPerson('step')">Follow One Step</button>
+        <div class="hint" id="followStatus">person detector starting</div>
+      </div>
     </aside>
     <section class="video" id="videoPanel">
       <img id="video" src="/video.mjpg" alt="Live robot video">
@@ -597,6 +743,7 @@ _INDEX_HTML = """<!doctype html>
   <script>
     const statusEl = document.getElementById("status");
     const faceStatus = document.getElementById("faceStatus");
+    const followStatus = document.getElementById("followStatus");
     const gunLogEl = document.getElementById("gunLog");
     const stateDot = document.getElementById("stateDot");
     const stateText = document.getElementById("stateText");
@@ -615,6 +762,7 @@ _INDEX_HTML = """<!doctype html>
     let gamepadJumpDown = false;
     let gamepadStopDown = false;
     let latestFaces = [];
+    let selectedFaceIndex = 0;
     let lastStatus = null;
     let lastMoveSent = 0;
     let moveInFlight = false;
@@ -739,6 +887,7 @@ _INDEX_HTML = """<!doctype html>
     function gunFire() { return api("/api/gun/fire").catch(() => {}); }
     function gunStop() { return api("/api/gun/stop").catch(() => {}); }
     function sport(name, parameter = null) { return api("/api/sport", {name, parameter}).catch(() => {}); }
+    function followPerson(action) { return api(`/api/follow/${action}`).catch(() => {}); }
     function enrollFace() {
       const input = document.getElementById("faceName");
       let label = input.value.trim();
@@ -750,7 +899,7 @@ _INDEX_HTML = """<!doctype html>
         statusEl.textContent = "enter a face name first";
         return;
       }
-      return api("/api/face/enroll", {label, index:0}).catch(() => {});
+      return api("/api/face/enroll", {label, index:selectedFaceIndex}).catch(() => {});
     }
     function deadzone(value, zone = 0.18) {
       return Math.abs(value) < zone ? 0 : value;
@@ -825,6 +974,8 @@ _INDEX_HTML = """<!doctype html>
       const img = document.getElementById("video");
       const overlay = document.getElementById("overlay");
       const faces = data.faces || [];
+      const people = (data.people || []).map((person) => ({...person, person:true}));
+      const visionItems = [...faces, ...people];
       latestFaces = faces;
       const panelRect = panel.getBoundingClientRect();
       const imgRatio = (data.video_size?.width || 1) / (data.video_size?.height || 1);
@@ -837,7 +988,7 @@ _INDEX_HTML = """<!doctype html>
         drawH = panelRect.width / imgRatio;
         offY = (panelRect.height - drawH) / 2;
       }
-      faces.forEach((face, index) => {
+      visionItems.forEach((face, index) => {
         let box = overlay.children[index];
         if (!box) {
           box = document.createElement("div");
@@ -846,6 +997,14 @@ _INDEX_HTML = """<!doctype html>
         }
         box.className = "box";
         if (face.known) box.classList.add("known");
+        if (face.person) box.classList.add("person");
+        if (!face.person) {
+          box.classList.add("face-selectable");
+          if (index === selectedFaceIndex) box.classList.add("selected");
+          box.onclick = () => { selectedFaceIndex = index; drawFaces(lastStatus || data); };
+        } else {
+          box.onclick = null;
+        }
         box.style.left = `${offX + face.x * drawW}px`;
         box.style.top = `${offY + face.y * drawH}px`;
         box.style.width = `${face.w * drawW}px`;
@@ -853,10 +1012,15 @@ _INDEX_HTML = """<!doctype html>
         const score = typeof face.score === "number" ? ` ${face.score.toFixed(2)}` : "";
         box.firstElementChild.textContent = `${face.label || "face"}${score}`;
       });
-      while (overlay.children.length > faces.length) overlay.lastElementChild.remove();
+      while (overlay.children.length > visionItems.length) overlay.lastElementChild.remove();
+      if (selectedFaceIndex >= faces.length) selectedFaceIndex = Math.max(0, faces.length - 1);
       const names = faces.map((face) => face.label || "face").join(", ");
       const engine = `${data.face_detector || "face"} + ${data.face_backend || "labels"}`;
-      faceStatus.textContent = `${engine} / ${faces.length} visible${names ? ": " + names : ""}${data.face_error ? " / " + data.face_error : ""}`;
+      faceStatus.textContent = `${engine} / ${faces.length} visible${names ? ": " + names : ""}${faces.length > 1 ? ` / selected face ${selectedFaceIndex + 1}` : ""}${data.face_error ? " / " + data.face_error : ""}`;
+      const follow = data.follow || {};
+      const detector = data.person_detector || {};
+      const command = follow.last_command || {};
+      followStatus.textContent = `${follow.active ? "FOLLOWING" : "idle"} / ${people.length} people / ${detector.ready ? "detector ready" : detector.detail || "detector loading"} / ${follow.last_action || "idle"}${follow.active ? ` / vx ${Number(command.vx || 0).toFixed(2)} yaw ${Number(command.vyaw || 0).toFixed(2)}` : ""}`;
     }
     function applyGunState(gun) {
       const state = gun?.state || (gun?.active ? "firing" : "idle");

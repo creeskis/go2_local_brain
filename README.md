@@ -70,6 +70,7 @@ For presentation video, use these in this order:
 ```bash
 cd ~/robotics/go2_local_brain
 source .venv/bin/activate
+./scripts/setup_local_vision.sh   # one time on a new WSL install
 ./scripts/run_local_cockpit.sh
 ```
 
@@ -85,6 +86,8 @@ Use this for:
 - WASD driving
 - Bluetooth/Xbox-style controller driving
 - Face ID boxes and enrollment
+- High-resolution multi-face YOLO detection with batched Buffalo-L identity
+- Python/YOLO person following with live person boxes and start/stop controls
 - Motion buttons
 - Optional host-side trigger controls
 

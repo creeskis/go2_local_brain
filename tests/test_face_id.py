@@ -12,6 +12,7 @@ from go2_local_brain.autonomy.face_id import (
     UNKNOWN_LABEL,
     FaceDatabase,
     FaceIdentifier,
+    InsightFaceEmbedder,
     NullFaceEmbedder,
     build_face_embedder,
     cosine_similarity,
@@ -129,6 +130,24 @@ class FaceIdentifierTests(unittest.TestCase):
         self.assertEqual(faces[0].label, "cooper")
         self.assertTrue(faces[0].is_known)
 
+    def test_identifier_batches_multiple_faces(self) -> None:
+        class BatchEmbedder(NullFaceEmbedder):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def embed_many(self, image_rgb, boxes):
+                self.calls += 1
+                return [[1.0, 0.0], [0.0, 1.0]]
+
+        embedder = BatchEmbedder()
+        db = FaceDatabase(match_threshold=0.9)
+        db.enroll("cooper", [1.0, 0.0])
+        db.enroll("alex", [0.0, 1.0])
+        ident = FaceIdentifier(embedder, db)
+        faces = ident.identify_faces(object(), [(0, 0, 20, 20), (30, 0, 50, 20)])
+        self.assertEqual(embedder.calls, 1)
+        self.assertEqual([face.label for face in faces], ["cooper", "alex"])
+
 
 class EmbedderFactoryTests(unittest.TestCase):
     def test_null_backend(self) -> None:
@@ -137,6 +156,38 @@ class EmbedderFactoryTests(unittest.TestCase):
     def test_unknown_backend_raises(self) -> None:
         with self.assertRaises(ValueError):
             build_face_embedder("not-a-backend")
+
+
+class InsightFaceBatchTests(unittest.TestCase):
+    def test_two_faces_are_mapped_in_one_model_pass(self) -> None:
+        import numpy as np
+        from PIL import Image
+
+        class FakeFace:
+            def __init__(self, bbox, embedding):
+                self.bbox = bbox
+                self.normed_embedding = np.asarray(embedding)
+
+        class FakeApp:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def get(self, _image):
+                self.calls += 1
+                return [
+                    FakeFace([10, 10, 40, 40], [1.0, 0.0]),
+                    FakeFace([110, 10, 140, 40], [0.0, 1.0]),
+                ]
+
+        embedder = InsightFaceEmbedder()
+        embedder._app = FakeApp()
+        embedder._np = np
+        embeddings = embedder.embed_many(
+            Image.new("RGB", (160, 80)),
+            [(5, 5, 45, 45), (105, 5, 145, 45)],
+        )
+        self.assertEqual(embedder._app.calls, 1)
+        self.assertEqual(embeddings, [[1.0, 0.0], [0.0, 1.0]])
 
 
 if __name__ == "__main__":

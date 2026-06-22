@@ -62,7 +62,7 @@ class YoloFaceDetector:
         *,
         confidence: float = 0.45,
         image_size: int = 640,
-        device: str = "cpu",
+        device: str = "",
     ) -> None:
         self._model_path = str(Path(model).expanduser())
         self._confidence = min(1.0, max(0.01, float(confidence)))
@@ -83,13 +83,16 @@ class YoloFaceDetector:
 
     def detect(self, image_rgb: Any) -> list[FaceBox]:
         self._ensure()
-        results = self._model.predict(
-            source=image_rgb,
-            conf=self._confidence,
-            imgsz=self._image_size,
-            device=self._device,
-            verbose=False,
-        )
+        kwargs: dict[str, Any] = {
+            "source": image_rgb,
+            "conf": self._confidence,
+            "imgsz": self._image_size,
+            "verbose": False,
+            "max_det": 32,
+        }
+        if self._device:
+            kwargs["device"] = self._device
+        results = self._model.predict(**kwargs)
         boxes: list[FaceBox] = []
         if not results:
             return boxes
@@ -117,8 +120,8 @@ def build_face_detector(name: str | None = None) -> FaceDetector:
             raise RuntimeError("GO2_FACE_YOLO_MODEL must point to a YOLO face model")
         return YoloFaceDetector(
             model,
-            confidence=float(os.getenv("GO2_FACE_YOLO_CONFIDENCE", "0.45")),
-            image_size=int(os.getenv("GO2_FACE_YOLO_IMAGE_SIZE", "640")),
-            device=os.getenv("GO2_FACE_YOLO_DEVICE", "cpu"),
+            confidence=float(os.getenv("GO2_FACE_YOLO_CONFIDENCE", "0.25")),
+            image_size=int(os.getenv("GO2_FACE_YOLO_IMAGE_SIZE", "960")),
+            device=os.getenv("GO2_FACE_YOLO_DEVICE", ""),
         )
     raise ValueError(f"unknown face detector backend: {key!r}")

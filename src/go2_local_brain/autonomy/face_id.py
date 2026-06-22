@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -229,6 +230,14 @@ class FaceEmbedder:
         """
         raise NotImplementedError
 
+    def embed_many(
+        self,
+        image_rgb: Any,
+        boxes: Sequence[tuple[int, int, int, int]],
+    ) -> list[Optional[Embedding]]:
+        """Embed several boxes. Backends may override this with a batch pass."""
+        return [self.embed(image_rgb, box) for box in boxes]
+
 
 class NullFaceEmbedder(FaceEmbedder):
     """Default: embeds nothing. Used when no face backend is configured."""
@@ -302,7 +311,8 @@ class InsightFaceEmbedder(FaceEmbedder):
             ) from exc
         providers = self._providers or ["CUDAExecutionProvider", "CPUExecutionProvider"]
         app = FaceAnalysis(name=self._model_name, providers=providers)
-        app.prepare(ctx_id=0, det_size=(320, 320))
+        det_size = max(320, int(os.getenv("GO2_FACE_INSIGHT_DET_SIZE", "640")))
+        app.prepare(ctx_id=0, det_size=(det_size, det_size))
         self._app = app
         self._np = np
 
@@ -311,38 +321,49 @@ class InsightFaceEmbedder(FaceEmbedder):
         return 512
 
     def embed(self, image_rgb: Any, box: tuple[int, int, int, int]) -> Optional[Embedding]:
+        return self.embed_many(image_rgb, [box])[0]
+
+    def embed_many(
+        self,
+        image_rgb: Any,
+        boxes: Sequence[tuple[int, int, int, int]],
+    ) -> list[Optional[Embedding]]:
+        """Run Buffalo once and associate every detected face to a YOLO box."""
+        if not boxes:
+            return []
         self._ensure()
-        # YOLO has already localized the face. Crop with some context before
-        # asking Buffalo to align it; rescanning the full camera frame here is
-        # slower and can select a nearby person's face.
-        source = image_rgb.convert("RGB")
-        x1, y1, x2, y2 = box
-        pad_x = max(12, int((x2 - x1) * 0.60))
-        pad_y = max(12, int((y2 - y1) * 0.60))
-        crop = source.crop(
-            (
-                max(0, x1 - pad_x),
-                max(0, y1 - pad_y),
-                min(source.width, x2 + pad_x),
-                min(source.height, y2 + pad_y),
-            )
-        )
         # InsightFace FaceAnalysis expects OpenCV-style BGR input.
-        arr = self._np.asarray(crop)[:, :, ::-1]
+        arr = self._np.asarray(image_rgb.convert("RGB"))[:, :, ::-1]
         faces = self._app.get(arr)
         if not faces:
-            return None
-        best = max(
-            faces,
-            key=lambda face: max(0.0, face.bbox[2] - face.bbox[0])
-            * max(0.0, face.bbox[3] - face.bbox[1]),
-        )
-        emb = getattr(best, "normed_embedding", None)
-        if emb is None:
-            emb = getattr(best, "embedding", None)
-        if emb is None:
-            return None
-        return [float(v) for v in emb]
+            return [None] * len(boxes)
+
+        available = set(range(len(faces)))
+        results: list[Optional[Embedding]] = []
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            if not available:
+                results.append(None)
+                continue
+            cx = (box[0] + box[2]) / 2.0
+            cy = (box[1] + box[3]) / 2.0
+
+            def distance(index: int) -> float:
+                fx1, fy1, fx2, fy2 = faces[index].bbox
+                return (cx - (fx1 + fx2) / 2.0) ** 2 + (cy - (fy1 + fy2) / 2.0) ** 2
+
+            best_index = min(available, key=distance)
+            max_center_distance = max(48.0, float(x2 - x1), float(y2 - y1)) * 1.5
+            if distance(best_index) > max_center_distance * max_center_distance:
+                results.append(None)
+                continue
+            available.remove(best_index)
+            best = faces[best_index]
+            emb = getattr(best, "normed_embedding", None)
+            if emb is None:
+                emb = getattr(best, "embedding", None)
+            results.append(None if emb is None else [float(v) for v in emb])
+        return results
 
 
 def build_face_embedder(backend: str = "null", **kwargs: Any) -> FaceEmbedder:
@@ -388,9 +409,9 @@ class FaceIdentifier:
     ) -> list[IdentifiedFace]:
         """Embed + identify each (x1,y1,x2,y2) face box. Unmatched -> unknown."""
         results: list[IdentifiedFace] = []
-        for box in face_boxes:
+        embeddings = self._embedder.embed_many(image_rgb, face_boxes)
+        for box, emb in zip(face_boxes, embeddings):
             x1, y1, x2, y2 = box
-            emb = self._embedder.embed(image_rgb, box)
             if emb is None:
                 match = FaceMatch(UNKNOWN_LABEL, 0.0, False)
             else:

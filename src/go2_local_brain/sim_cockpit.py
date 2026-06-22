@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 _FACE_ENABLED = os.getenv("GO2_FACE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 _FACE_INTERVAL_S = max(0.50, float(os.getenv("GO2_FACE_INTERVAL_S", "1.25")))
 _DEFAULT_FACE_BACKEND = os.getenv("GO2_FACE_BACKEND", "null")
+_FACE_MAX_RESULTS = max(2, int(os.getenv("GO2_FACE_MAX_RESULTS", "16")))
 
 
 class SimGun:
@@ -287,7 +288,7 @@ class SimCockpit:
                     "score": face.score,
                     "known": face.label != UNKNOWN_LABEL,
                 }
-                for face in identified[:8]
+                for face in identified[:_FACE_MAX_RESULTS]
             ]
         except Exception as exc:  # noqa: BLE001
             self._face_error = str(exc)
