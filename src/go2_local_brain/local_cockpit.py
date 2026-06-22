@@ -17,7 +17,8 @@ from .config import load_config
 from .autonomy.face_id import FaceDatabase, FaceIdentifier, NullFaceEmbedder, UNKNOWN_LABEL, build_face_embedder
 from .autonomy.face_detection import FaceDetector, build_face_detector
 from .autonomy.follow import HumanFollowController
-from .autonomy.perception import Observation, PerceptionHealth, YoloPerceptionProvider, detection_to_dict
+from .autonomy.perception import Observation, PerceptionHealth, YoloPerceptionProvider
+from .autonomy.person_identity import PersonIdentityTracker
 from .driver.webrtc_client import Go2Config, Go2WebRTCClient
 from .gun_relay import GunRelay, gun_relay_config_from_env
 
@@ -73,6 +74,11 @@ class LocalCockpit:
         self._follow: HumanFollowController | None = None
         self._follow_task: asyncio.Task[None] | None = None
         self._follow_last_action = "idle"
+        self._follow_identity = os.getenv("GO2_FOLLOW_IDENTITY", "").strip()
+        self._person_tracker = PersonIdentityTracker(
+            body_ttl_s=float(os.getenv("GO2_PERSON_TRACK_TTL_S", "2.0")),
+            identity_ttl_s=float(os.getenv("GO2_PERSON_IDENTITY_TTL_S", "75.0")),
+        )
 
     async def run(self) -> None:
         cfg = load_config()
@@ -237,6 +243,7 @@ class LocalCockpit:
     def _finish_face_scan(self, task: asyncio.Task[tuple[list[dict[str, Any]], Any]]) -> None:
         try:
             self._faces, self._faces_image = task.result()
+            self._person_tracker.observe_faces(self._faces)
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001
@@ -410,6 +417,13 @@ class LocalCockpit:
             try:
                 self._perception_health = await self._perception.health()
                 self._latest_observation = await self._perception.observe()
+                self._person_tracker.update_bodies(
+                    self._latest_observation.detections,
+                    self._latest_observation.frame_width,
+                    self._latest_observation.frame_height,
+                    now=self._latest_observation.timestamp,
+                )
+                self._person_tracker.observe_faces(self._faces, now=self._latest_observation.timestamp)
             except Exception as exc:  # noqa: BLE001
                 log.exception("person perception failed")
                 self._perception_health = PerceptionHealth(False, "yolo", str(exc))
@@ -422,6 +436,13 @@ class LocalCockpit:
 
     async def _follow_action(self, request: web.Request) -> web.Response:
         action = request.match_info["action"]
+        if action == "target":
+            payload = await _json_or_empty(request)
+            label = str(payload.get("label", "")).strip()
+            self._follow_identity = "" if label.casefold() in {"", "any", "anyone"} else label
+            result = f"follow target: {self._follow_identity or 'any person'}"
+            self._follow_last_action = result
+            return web.json_response({"ok": True, "result": result})
         if action == "start":
             if self._follow is None or self._perception is None:
                 return web.json_response({"ok": False, "result": "person follow is disabled"}, status=503)
@@ -451,8 +472,23 @@ class LocalCockpit:
         if self._follow is None:
             self._follow_last_action = "not ready"
             return
-        command = await self._follow.step(self._latest_observation)
-        self._follow_last_action = command.reason
+        observation = self._latest_observation
+        target_missing = False
+        if self._follow_identity:
+            track = self._person_tracker.find(self._follow_identity)
+            target_missing = track is None
+            observation = Observation(
+                timestamp=observation.timestamp,
+                frame_available=observation.frame_available,
+                detections=[] if track is None else [track.detection],
+                frame_width=observation.frame_width,
+                frame_height=observation.frame_height,
+                note=f"named follow target={self._follow_identity}",
+            )
+        command = await self._follow.step(observation)
+        self._follow_last_action = (
+            f"searching for {self._follow_identity}" if target_missing else command.reason
+        )
 
     async def _stop_follow(self, *, stop_robot: bool = True) -> None:
         task = self._follow_task
@@ -471,23 +507,7 @@ class LocalCockpit:
     def _status_payload(self) -> dict[str, Any]:
         sport_state = getattr(self._client, "_sport_state", {}) if self._client is not None else {}
         self._battery_percent = _extract_battery_percent(sport_state)
-        people = []
-        for detection in self._latest_observation.detections:
-            if not detection.is_human():
-                continue
-            payload = detection_to_dict(
-                detection,
-                self._latest_observation.frame_width,
-                self._latest_observation.frame_height,
-            )
-            box = payload.get("box")
-            if isinstance(box, dict):
-                people.append(
-                    {
-                        "x": box["left"], "y": box["top"], "w": box["width"], "h": box["height"],
-                        "label": "person", "score": detection.confidence,
-                    }
-                )
+        people = [track.to_dict() for track in self._person_tracker.tracks()]
         return {
             "status": self._status,
             "video_frames": self._video_frames,
@@ -506,6 +526,7 @@ class LocalCockpit:
                 "last_action": self._follow_last_action,
                 "last_target": self._follow.last_target if self._follow is not None else "none",
                 "last_command": self._follow.last_command.__dict__ if self._follow is not None else None,
+                "target_identity": self._follow_identity or "any person",
             },
             "sport_commands": self._available_sport_commands,
             "gun_active": self._gun.active,
@@ -641,6 +662,7 @@ _INDEX_HTML = """<!doctype html>
     .box.known span { background:#55d98a; }
     .box.person { border-color:#50a7ff; box-shadow:0 0 0 1px rgba(0,0,0,.8), 0 0 14px rgba(80,167,255,.32); }
     .box.person span { background:#50a7ff; }
+    .box.person.targetable { pointer-events:auto; cursor:pointer; }
     .box.face-selectable { pointer-events:auto; cursor:pointer; }
     .box.selected { outline:3px solid #fff; outline-offset:3px; }
     .box span { background:#f1c94a; padding:1px 4px; position:absolute; left:-2px; top:-20px; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -727,6 +749,10 @@ _INDEX_HTML = """<!doctype html>
       <div class="section">
         <h2>Person Follow</h2>
         <div class="grid2">
+          <input id="followName" placeholder="name or any" autocomplete="off">
+          <button onclick="setFollowTarget()">Set Target</button>
+        </div>
+        <div class="grid2">
           <button class="ok" onclick="followPerson('start')">Start Follow</button>
           <button class="stop" onclick="followPerson('stop')">Stop Follow</button>
         </div>
@@ -744,6 +770,7 @@ _INDEX_HTML = """<!doctype html>
     const statusEl = document.getElementById("status");
     const faceStatus = document.getElementById("faceStatus");
     const followStatus = document.getElementById("followStatus");
+    const followName = document.getElementById("followName");
     const gunLogEl = document.getElementById("gunLog");
     const stateDot = document.getElementById("stateDot");
     const stateText = document.getElementById("stateText");
@@ -888,6 +915,10 @@ _INDEX_HTML = """<!doctype html>
     function gunStop() { return api("/api/gun/stop").catch(() => {}); }
     function sport(name, parameter = null) { return api("/api/sport", {name, parameter}).catch(() => {}); }
     function followPerson(action) { return api(`/api/follow/${action}`).catch(() => {}); }
+    function setFollowTarget(label = followName.value) {
+      followName.value = label || "";
+      return api("/api/follow/target", {label:label || "any"}).catch(() => {});
+    }
     function enrollFace() {
       const input = document.getElementById("faceName");
       let label = input.value.trim();
@@ -1003,7 +1034,12 @@ _INDEX_HTML = """<!doctype html>
           if (index === selectedFaceIndex) box.classList.add("selected");
           box.onclick = () => { selectedFaceIndex = index; drawFaces(lastStatus || data); };
         } else {
-          box.onclick = null;
+          if (face.known && face.label !== "unknown") {
+            box.classList.add("targetable");
+            box.onclick = () => setFollowTarget(face.label);
+          } else {
+            box.onclick = null;
+          }
         }
         box.style.left = `${offX + face.x * drawW}px`;
         box.style.top = `${offY + face.y * drawH}px`;
@@ -1020,7 +1056,7 @@ _INDEX_HTML = """<!doctype html>
       const follow = data.follow || {};
       const detector = data.person_detector || {};
       const command = follow.last_command || {};
-      followStatus.textContent = `${follow.active ? "FOLLOWING" : "idle"} / ${people.length} people / ${detector.ready ? "detector ready" : detector.detail || "detector loading"} / ${follow.last_action || "idle"}${follow.active ? ` / vx ${Number(command.vx || 0).toFixed(2)} yaw ${Number(command.vyaw || 0).toFixed(2)}` : ""}`;
+      followStatus.textContent = `${follow.active ? "FOLLOWING" : "idle"} ${follow.target_identity || "any person"} / ${people.length} people / ${detector.ready ? "detector ready" : detector.detail || "detector loading"} / ${follow.last_action || "idle"}${follow.active ? ` / vx ${Number(command.vx || 0).toFixed(2)} yaw ${Number(command.vyaw || 0).toFixed(2)}` : ""}`;
     }
     function applyGunState(gun) {
       const state = gun?.state || (gun?.active ? "firing" : "idle");
