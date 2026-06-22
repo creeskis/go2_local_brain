@@ -91,6 +91,17 @@ Use this for:
 - Motion buttons
 - Optional host-side trigger controls
 
+### Controller-Only Cockpit
+
+```bash
+./scripts/run_controller_cockpit.sh
+```
+
+Open `http://127.0.0.1:8773`. This full-screen surface contains only robot
+video and a controller HUD. RT is analog run; LT is a filtered hold gesture
+for BackStand. Bumpers map left/right flips, ABXY map jump/sit/pounce/stand,
+and the D-pad maps front/back flips plus speed down/up.
+
 ### Home Simulation Cockpit
 
 Use this away from the work computer when the dog and Jetson are not
