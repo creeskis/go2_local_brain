@@ -1,0 +1,28 @@
+[Unit]
+Description=go2_local_brain full autonomy: video stream + LiDAR roam + person follow (headless)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@REPO@
+Environment=HOME=@HOME@
+Environment=PYTHONUNBUFFERED=1
+# SAFE DEFAULT: dry run (connects, streams video, logs decisions, no motion).
+# env.local (written by --live) overrides this because it loads after.
+Environment=GO2_AUTONOMY_ENABLE=0
+EnvironmentFile=-@REPO@/.env
+EnvironmentFile=-@HOME@/.go2/env.local
+# Pin Jetson clocks to max for consistent control latency (runs as root, no-ops off-Jetson).
+ExecStartPre=+@REPO@/scripts/jetson_perf.sh
+ExecStart=@VENV@/bin/python -m go2_local_brain.autonomy_agent
+KillSignal=SIGTERM
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

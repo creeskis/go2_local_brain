@@ -5,6 +5,39 @@ GUI, no Ollama/LLM). It connects to the Go2 over WebRTC, streams the LiDAR voxel
 cloud, and continuously roams while avoiding obstacles. Supervised by systemd
 (`go2-patrol.service`) and deployed over the host→dog→Jetson SSH bridge.
 
+## Full autonomy (default): video + follow + roam
+
+The **default** agent deployed to the Jetson is `go2-autonomy`
+(`go2_local_brain.autonomy_agent`). Everything runs on the Jetson; the laptop
+only watches an MJPEG video stream. No prompts, no LLM. Behaviour:
+
+- **Follow** the nearest detected person while one is in frame (centering +
+  approaching, LiDAR-gated so it never walks into a wall).
+- **Scan** in place for a couple of seconds after losing them
+  (`GO2_FOLLOW_GRACE_S`).
+- **Roam** freely on LiDAR once they're gone — until a person reappears.
+
+Deploy it the same way (autonomy is the default agent):
+
+```bash
+GUN_DOG_PASSWORD=… GUN_JETSON_PASSWORD=… GUN_JETSON_SUDO_PASSWORD=… \
+  bash scripts/deploy_patrol_to_jetson.sh            # dry run
+  …                                                  # add --live to move
+```
+
+Watch the video from your laptop (the Jetson is behind the dog, so forward the
+port over the same bridge), then open `http://127.0.0.1:8788`:
+
+```bash
+SSHPASS='<dog password>' sshpass -e ssh -L 8788:10.42.0.2:8788 root@192.168.123.121
+```
+
+**Person-follow needs a detector.** YOLO (`ultralytics` + a Jetson `torch`
+build) drives person detection; set `GO2_DETECTOR_DEVICE=cuda` to use the GPU.
+Without it the agent still streams video and roams on LiDAR — it just won't
+follow. The rest of this doc covers the simpler **patrol-only** agent
+(`GO2_JETSON_AGENT=patrol`), which shares the same roam logic and safety model.
+
 ## How it works
 
 ```
