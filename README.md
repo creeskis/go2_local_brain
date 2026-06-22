@@ -179,6 +179,21 @@ larger models.
 
 Use this on the host computer when the dog is not available:
 
+On Windows, the browser cockpit can use the webcam directly with YOLO face
+boxes and Buffalo-L identity embeddings:
+
+```powershell
+.\scripts\setup_windows_faceid.ps1
+.\scripts\run_webcam_cockpit.ps1
+```
+
+Open `http://127.0.0.1:8785`. The setup is isolated in `.venv-win`; the
+launcher downloads a checksum-verified `yolov8n-face.pt` model once into the
+user's local app-data cache. Face embeddings remain in the local FaceID
+database and are not committed to this repository.
+
+For the lightweight command-line check:
+
 ```bash
 pip install opencv-python
 python scripts/webcam_faceid_test.py --seconds 8

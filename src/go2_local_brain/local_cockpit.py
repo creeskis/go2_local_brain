@@ -15,6 +15,7 @@ from aiohttp import web
 
 from .config import load_config
 from .autonomy.face_id import FaceDatabase, FaceIdentifier, NullFaceEmbedder, UNKNOWN_LABEL, build_face_embedder
+from .autonomy.face_detection import FaceDetector, build_face_detector
 from .driver.webrtc_client import Go2Config, Go2WebRTCClient
 from .gun_relay import GunRelay, gun_relay_config_from_env
 
@@ -49,9 +50,12 @@ class LocalCockpit:
         self._last_face_scan = 0.0
         self._face_backend = os.getenv("GO2_FACE_BACKEND", _DEFAULT_FACE_BACKEND)
         self._face_identifier: FaceIdentifier | None = None
+        self._face_detector: FaceDetector | None = None
+        self._face_detector_name = os.getenv("GO2_FACE_DETECTOR", "haar")
         self._face_db_path = Path(os.getenv("GO2_FACE_DB", str(FaceDatabase.default_path()))).expanduser()
         self._latest_image: Any = None
-        self._face_task: asyncio.Task[list[dict[str, Any]]] | None = None
+        self._faces_image: Any = None
+        self._face_task: asyncio.Task[tuple[list[dict[str, Any]], Any]] | None = None
         self._battery_percent: float | None = None
         self._available_sport_commands: list[str] = []
 
@@ -145,6 +149,10 @@ class LocalCockpit:
     def _load_face_detector(self) -> None:
         database = FaceDatabase.load_or_empty(self._face_db_path)
         try:
+            self._face_detector = build_face_detector(self._face_detector_name)
+        except Exception as exc:  # noqa: BLE001
+            self._face_error = f"detector unavailable: {exc}"
+        try:
             embedder = build_face_embedder(self._face_backend)
             self._face_identifier = FaceIdentifier(embedder, database)
         except Exception as exc:  # noqa: BLE001
@@ -155,7 +163,9 @@ class LocalCockpit:
         if self._face_identifier is None:
             return []
         try:
-            boxes = _face_boxes(image)
+            if self._face_detector is None:
+                return []
+            boxes = self._face_detector.detect(image)
             identified = self._face_identifier.identify_faces(image, boxes)
             width = max(1, int(getattr(image, "width", 1)))
             height = max(1, int(getattr(image, "height", 1)))
@@ -182,12 +192,13 @@ class LocalCockpit:
         self._face_task = asyncio.create_task(self._identify_faces_off_loop(image), name="go2-face-scan")
         self._face_task.add_done_callback(self._finish_face_scan)
 
-    async def _identify_faces_off_loop(self, image: Any) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._identify_faces, image)
+    async def _identify_faces_off_loop(self, image: Any) -> tuple[list[dict[str, Any]], Any]:
+        faces = await asyncio.to_thread(self._identify_faces, image)
+        return faces, image
 
-    def _finish_face_scan(self, task: asyncio.Task[list[dict[str, Any]]]) -> None:
+    def _finish_face_scan(self, task: asyncio.Task[tuple[list[dict[str, Any]], Any]]) -> None:
         try:
-            self._faces = task.result()
+            self._faces, self._faces_image = task.result()
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001
@@ -245,11 +256,11 @@ class LocalCockpit:
             return web.json_response({"ok": False, "result": "face label is required"}, status=400)
         if self._face_identifier is None:
             return web.json_response({"ok": False, "result": f"face backend unavailable: {self._face_error}"}, status=400)
-        if self._latest_image is None or not self._faces:
+        if self._faces_image is None or not self._faces:
             return web.json_response({"ok": False, "result": "no face is visible yet"}, status=400)
         face = self._faces[min(max(index, 0), len(self._faces) - 1)]
-        width = max(1, int(getattr(self._latest_image, "width", 1)))
-        height = max(1, int(getattr(self._latest_image, "height", 1)))
+        width = max(1, int(getattr(self._faces_image, "width", 1)))
+        height = max(1, int(getattr(self._faces_image, "height", 1)))
         box = (
             int(face["x"] * width),
             int(face["y"] * height),
@@ -257,7 +268,7 @@ class LocalCockpit:
             int((face["y"] + face["h"]) * height),
         )
         try:
-            ok = self._face_identifier.enroll_from_image(label, self._latest_image, box)
+            ok = self._face_identifier.enroll_from_image(label, self._faces_image, box)
             if not ok:
                 return web.json_response({"ok": False, "result": "face embedding failed"}, status=400)
             path = self._face_identifier.database.save(self._face_db_path)
@@ -361,6 +372,7 @@ class LocalCockpit:
             "faces": self._faces,
             "video_size": self._video_size,
             "face_backend": self._face_backend,
+            "face_detector": self._face_detector_name,
             "face_error": self._face_error,
             "face_db": str(self._face_db_path),
             "sport_commands": self._available_sport_commands,
@@ -492,7 +504,9 @@ _INDEX_HTML = """<!doctype html>
     .crosshair::after { top:50%; left:0; right:0; height:2px; transform:translateY(-50%); }
     .crosshair-ring { position:absolute; inset:22px; border:2px solid rgba(255,255,255,.88); border-radius:50%; box-shadow:0 0 0 1px rgba(0,0,0,.55) inset; }
     .crosshair-dot { position:absolute; left:50%; top:50%; width:5px; height:5px; border-radius:50%; background:#f1c94a; transform:translate(-50%, -50%); box-shadow:0 0 0 1px rgba(0,0,0,.75); }
-    .box { position:absolute; border:2px solid #f1c94a; box-shadow:0 0 0 1px rgba(0,0,0,.8); color:#111; font-size:12px; font-weight:800; }
+    .box { position:absolute; border:2px solid #f1c94a; box-shadow:0 0 0 1px rgba(0,0,0,.8); color:#111; font-size:12px; font-weight:800; transition:left .24s linear, top .24s linear, width .24s linear, height .24s linear, opacity .18s ease; will-change:left,top,width,height; }
+    .box.known { border-color:#55d98a; }
+    .box.known span { background:#55d98a; }
     .box span { background:#f1c94a; padding:1px 4px; position:absolute; left:-2px; top:-20px; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .hint { color:var(--muted); font-size:12px; margin-top:8px; }
     .log { height:132px; overflow:auto; margin-top:8px; padding:8px; border:1px solid var(--line); border-radius:6px; background:#090b0d; color:#b8c0c7; font:11px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; white-space:pre-wrap; }
@@ -810,7 +824,6 @@ _INDEX_HTML = """<!doctype html>
       const panel = document.getElementById("videoPanel");
       const img = document.getElementById("video");
       const overlay = document.getElementById("overlay");
-      overlay.innerHTML = "";
       const faces = data.faces || [];
       latestFaces = faces;
       const panelRect = panel.getBoundingClientRect();
@@ -824,19 +837,26 @@ _INDEX_HTML = """<!doctype html>
         drawH = panelRect.width / imgRatio;
         offY = (panelRect.height - drawH) / 2;
       }
-      faces.forEach((face) => {
-        const box = document.createElement("div");
+      faces.forEach((face, index) => {
+        let box = overlay.children[index];
+        if (!box) {
+          box = document.createElement("div");
+          box.innerHTML = "<span></span>";
+          overlay.appendChild(box);
+        }
         box.className = "box";
+        if (face.known) box.classList.add("known");
         box.style.left = `${offX + face.x * drawW}px`;
         box.style.top = `${offY + face.y * drawH}px`;
         box.style.width = `${face.w * drawW}px`;
         box.style.height = `${face.h * drawH}px`;
         const score = typeof face.score === "number" ? ` ${face.score.toFixed(2)}` : "";
-        box.innerHTML = `<span>${face.label || "face"}${score}</span>`;
-        overlay.appendChild(box);
+        box.firstElementChild.textContent = `${face.label || "face"}${score}`;
       });
+      while (overlay.children.length > faces.length) overlay.lastElementChild.remove();
       const names = faces.map((face) => face.label || "face").join(", ");
-      faceStatus.textContent = `${faces.length} visible${names ? ": " + names : ""}${data.face_error ? " / " + data.face_error : ""}`;
+      const engine = `${data.face_detector || "face"} + ${data.face_backend || "labels"}`;
+      faceStatus.textContent = `${engine} / ${faces.length} visible${names ? ": " + names : ""}${data.face_error ? " / " + data.face_error : ""}`;
     }
     function applyGunState(gun) {
       const state = gun?.state || (gun?.active ? "firing" : "idle");
@@ -863,7 +883,7 @@ _INDEX_HTML = """<!doctype html>
       applyGunState(gun);
       drawFaces(data);
     }
-    setInterval(refreshStatus, 900);
+    setInterval(refreshStatus, 500);
     refreshStatus();
   </script>
 </body>

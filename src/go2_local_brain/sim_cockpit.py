@@ -15,7 +15,8 @@ from aiohttp import web
 from PIL import Image, ImageDraw
 
 from .autonomy.face_id import FaceDatabase, FaceIdentifier, NullFaceEmbedder, UNKNOWN_LABEL, build_face_embedder
-from .local_cockpit import _INDEX_HTML, _face_boxes, _json_or_empty, _jpeg_from_image
+from .autonomy.face_detection import FaceDetector, build_face_detector
+from .local_cockpit import _INDEX_HTML, _json_or_empty, _jpeg_from_image
 
 log = logging.getLogger(__name__)
 
@@ -88,16 +89,19 @@ class SimCockpit:
         self._latest_jpeg: bytes | None = None
         self._latest_video_ts = 0.0
         self._latest_image: Image.Image | None = None
+        self._faces_image: Image.Image | None = None
         self._video_frames = 0
         self._status = "starting"
         self._last_result = "sim network booting"
         self._faces: list[dict[str, Any]] = []
         self._face_error = ""
         self._last_face_scan = 0.0
-        self._face_task: asyncio.Task[list[dict[str, Any]]] | None = None
+        self._face_task: asyncio.Task[tuple[list[dict[str, Any]], Image.Image]] | None = None
         self._face_backend = _DEFAULT_FACE_BACKEND
         self._face_db_path = Path(os.getenv("GO2_FACE_DB", str(FaceDatabase.default_path()))).expanduser()
         self._face_identifier: FaceIdentifier | None = None
+        self._face_detector: FaceDetector | None = None
+        self._face_detector_name = os.getenv("GO2_FACE_DETECTOR", "haar")
         self._video_size = {"width": 640, "height": 480}
         self._gun = SimGun()
         self._battery_percent = 87.0
@@ -205,6 +209,10 @@ class SimCockpit:
         if not cap.isOpened():
             self._face_error = f"camera {self._camera_index} unavailable; using generated sim video"
             return
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        cap.set(cv2.CAP_PROP_FPS, max(15.0, 1.0 / self._frame_period_s))
         self._cv2 = cv2
         self._capture = cap
         self._last_result = f"sim camera {self._camera_index} online"
@@ -236,6 +244,10 @@ class SimCockpit:
     def _load_face_detector(self) -> None:
         database = FaceDatabase.load_or_empty(self._face_db_path)
         try:
+            self._face_detector = build_face_detector(self._face_detector_name)
+        except Exception as exc:  # noqa: BLE001
+            self._face_error = f"detector unavailable: {exc}"
+        try:
             embedder = build_face_embedder(self._face_backend)
             self._face_identifier = FaceIdentifier(embedder, database)
         except Exception as exc:  # noqa: BLE001
@@ -249,14 +261,19 @@ class SimCockpit:
         self._face_task = asyncio.create_task(self._identify_faces_off_loop(image), name="go2-sim-face-scan")
         self._face_task.add_done_callback(self._finish_face_scan)
 
-    async def _identify_faces_off_loop(self, image: Image.Image) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._identify_faces, image)
+    async def _identify_faces_off_loop(
+        self, image: Image.Image
+    ) -> tuple[list[dict[str, Any]], Image.Image]:
+        faces = await asyncio.to_thread(self._identify_faces, image)
+        return faces, image
 
     def _identify_faces(self, image: Image.Image) -> list[dict[str, Any]]:
         if self._face_identifier is None:
             return []
         try:
-            boxes = _face_boxes(image)
+            if self._face_detector is None:
+                return []
+            boxes = self._face_detector.detect(image)
             identified = self._face_identifier.identify_faces(image, boxes)
             width = max(1, image.width)
             height = max(1, image.height)
@@ -276,9 +293,11 @@ class SimCockpit:
             self._face_error = str(exc)
             return []
 
-    def _finish_face_scan(self, task: asyncio.Task[list[dict[str, Any]]]) -> None:
+    def _finish_face_scan(
+        self, task: asyncio.Task[tuple[list[dict[str, Any]], Image.Image]]
+    ) -> None:
         try:
-            self._faces = task.result()
+            self._faces, self._faces_image = task.result()
         except asyncio.CancelledError:
             return
         except Exception as exc:  # noqa: BLE001
@@ -337,16 +356,16 @@ class SimCockpit:
         label = str(payload.get("label", "")).strip()
         if not label:
             return web.json_response({"ok": False, "result": "face label is required"}, status=400)
-        if self._face_identifier is None or self._latest_image is None or not self._faces:
+        if self._face_identifier is None or self._faces_image is None or not self._faces:
             return web.json_response({"ok": False, "result": "no face is visible yet"}, status=400)
         face = self._faces[0]
         box = (
-            int(face["x"] * self._latest_image.width),
-            int(face["y"] * self._latest_image.height),
-            int((face["x"] + face["w"]) * self._latest_image.width),
-            int((face["y"] + face["h"]) * self._latest_image.height),
+            int(face["x"] * self._faces_image.width),
+            int(face["y"] * self._faces_image.height),
+            int((face["x"] + face["w"]) * self._faces_image.width),
+            int((face["y"] + face["h"]) * self._faces_image.height),
         )
-        ok = self._face_identifier.enroll_from_image(label, self._latest_image, box)
+        ok = self._face_identifier.enroll_from_image(label, self._faces_image, box)
         if not ok:
             return web.json_response({"ok": False, "result": "face embedding failed"}, status=400)
         path = self._face_identifier.database.save(self._face_db_path)
@@ -362,6 +381,7 @@ class SimCockpit:
             "faces": self._faces,
             "video_size": self._video_size,
             "face_backend": self._face_backend,
+            "face_detector": self._face_detector_name,
             "face_error": self._face_error,
             "face_db": str(self._face_db_path),
             "sport_commands": ["BalanceStand", "RecoveryStand", "StandUp", "Sit", "Hello", "FrontJump"],

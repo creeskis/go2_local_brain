@@ -312,19 +312,31 @@ class InsightFaceEmbedder(FaceEmbedder):
 
     def embed(self, image_rgb: Any, box: tuple[int, int, int, int]) -> Optional[Embedding]:
         self._ensure()
-        arr = self._np.asarray(image_rgb)
+        # YOLO has already localized the face. Crop with some context before
+        # asking Buffalo to align it; rescanning the full camera frame here is
+        # slower and can select a nearby person's face.
+        source = image_rgb.convert("RGB")
+        x1, y1, x2, y2 = box
+        pad_x = max(12, int((x2 - x1) * 0.60))
+        pad_y = max(12, int((y2 - y1) * 0.60))
+        crop = source.crop(
+            (
+                max(0, x1 - pad_x),
+                max(0, y1 - pad_y),
+                min(source.width, x2 + pad_x),
+                min(source.height, y2 + pad_y),
+            )
+        )
+        # InsightFace FaceAnalysis expects OpenCV-style BGR input.
+        arr = self._np.asarray(crop)[:, :, ::-1]
         faces = self._app.get(arr)
         if not faces:
             return None
-        # Pick the detected face whose center is closest to the requested box.
-        cx = (box[0] + box[2]) / 2
-        cy = (box[1] + box[3]) / 2
-
-        def dist(f: Any) -> float:
-            fx1, fy1, fx2, fy2 = f.bbox
-            return (cx - (fx1 + fx2) / 2) ** 2 + (cy - (fy1 + fy2) / 2) ** 2
-
-        best = min(faces, key=dist)
+        best = max(
+            faces,
+            key=lambda face: max(0.0, face.bbox[2] - face.bbox[0])
+            * max(0.0, face.bbox[3] - face.bbox[1]),
+        )
         emb = getattr(best, "normed_embedding", None)
         if emb is None:
             emb = getattr(best, "embedding", None)

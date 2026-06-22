@@ -28,6 +28,7 @@ from go2_local_brain.autonomy.face_id import (  # noqa: E402
     UNKNOWN_LABEL,
     build_face_embedder,
 )
+from go2_local_brain.autonomy.face_detection import HaarFaceDetector, build_face_detector  # noqa: E402
 
 
 def _load_cv2() -> Any:
@@ -52,24 +53,6 @@ def _build_identifier(backend: str, db_path: Path) -> tuple[FaceIdentifier, str]
         return FaceIdentifier(NullFaceEmbedder(), database), f"identity disabled: {exc}"
 
 
-def _detect_faces(cv2: Any, frame_bgr: Any, *, max_width: int) -> list[tuple[int, int, int, int]]:
-    height, width = frame_bgr.shape[:2]
-    scale = 1.0
-    small = frame_bgr
-    if width > max_width:
-        scale = max_width / width
-        small = cv2.resize(frame_bgr, (int(width * scale), int(height * scale)))
-    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    if cascade.empty():
-        raise RuntimeError("OpenCV face cascade is empty")
-    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48))
-    return [
-        (int(x / scale), int(y / scale), int((x + w) / scale), int((y + h) / scale))
-        for x, y, w, h in faces
-    ]
-
-
 def _annotate(cv2: Any, frame_bgr: Any, faces: list[Any]) -> None:
     for face in faces:
         x1 = int(face.x - face.width / 2)
@@ -87,6 +70,7 @@ def main() -> int:
     parser.add_argument("--camera", type=int, default=0, help="OpenCV camera index")
     parser.add_argument("--seconds", type=float, default=8.0, help="Capture duration")
     parser.add_argument("--backend", choices=["null", "face_recognition", "insightface"], default="null")
+    parser.add_argument("--detector", choices=["haar", "yolo"], default="haar")
     parser.add_argument("--label", default="", help="Enroll the best visible face under this label")
     parser.add_argument("--db", default=str(FaceDatabase.default_path()))
     parser.add_argument("--max-width", type=int, default=360)
@@ -97,6 +81,7 @@ def main() -> int:
     cv2 = _load_cv2()
     db_path = Path(args.db).expanduser()
     identifier, backend_error = _build_identifier(args.backend, db_path)
+    detector = HaarFaceDetector(max_width=args.max_width) if args.detector == "haar" else build_face_detector("yolo")
 
     api = cv2.CAP_DSHOW if sys.platform.startswith("win") else 0
     cap = cv2.VideoCapture(args.camera, api)
@@ -115,9 +100,9 @@ def main() -> int:
                 time.sleep(0.05)
                 continue
             frames += 1
-            boxes = _detect_faces(cv2, frame, max_width=args.max_width)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(rgb)
+            boxes = detector.detect(image)
             faces = identifier.identify_faces(image, boxes)
             if len(faces) >= len(best_faces):
                 best_frame = frame.copy()
@@ -156,6 +141,7 @@ def main() -> int:
             for face in best_faces
         ],
         "backend": args.backend,
+        "detector": args.detector,
         "backend_error": backend_error,
         "db": str(db_path),
         "enrolled": enrolled,
