@@ -35,6 +35,16 @@ _ACTION_LOCK_S = {
     "backstand": 1.8, "jump": 1.2, "pounce": 1.4, "stand_up": 1.2, "sit_down": 1.2,
 }
 
+# Continuous locomotion gaits from the unitree_webrtc_connect (legion1581) MCF
+# table. Each is held by the robot until another gait is sent. The driver's
+# _sport_request_first resolves these against the MCF table first
+# (FreeJump=2047, FreeBound=2046, FreeWalk=2045), all toggled with {"data": True}.
+_GAIT_COMMANDS = {
+    "jump": ("FreeJump", {"data": True}),    # jump to move instead of walking
+    "bound": ("FreeBound", {"data": True}),  # bounding gait
+    "walk": ("FreeWalk", {"data": True}),    # return to the normal walking gait
+}
+
 
 class ControllerCockpit:
     def __init__(self, host: str, port: int, *, simulation: bool = False) -> None:
@@ -49,6 +59,7 @@ class ControllerCockpit:
         self._status = "starting"
         self._last_action = "none"
         self._action_lock_until = 0.0
+        self._gait = "walk"
         self._sim_task: asyncio.Task[None] | None = None
 
     async def run(self) -> None:
@@ -60,6 +71,7 @@ class ControllerCockpit:
         app.router.add_post("/api/move", self._move)
         app.router.add_post("/api/stop", self._stop)
         app.router.add_post("/api/action", self._action)
+        app.router.add_post("/api/gait", self._gait_toggle)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, self._host, self._port)
@@ -144,6 +156,7 @@ class ControllerCockpit:
                 "status": self._status,
                 "video_frames": self._video_frames,
                 "last_action": self._last_action,
+                "gait": self._gait,
                 "simulation": self._simulation,
             }
         )
@@ -229,7 +242,29 @@ class ControllerCockpit:
                 await self._client.sit_down()
             else:
                 await self._client.advanced_action(action)
+        # One-shot actions leave the robot standing, which exits any held gait.
+        self._gait = "walk"
         self._last_action = action
+
+    async def _gait_toggle(self, request: web.Request) -> web.Response:
+        payload = await _json(request)
+        requested = str(payload.get("gait", "")).strip().lower()
+        if requested not in ("jump", "bound"):
+            return web.json_response({"ok": False, "result": f"unknown gait {requested!r}"}, status=400)
+        # A D-pad press toggles the gait: pressing the active gait returns to walk.
+        target = "walk" if self._gait == requested else requested
+        try:
+            await self._apply_gait(target)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"ok": False, "gait": self._gait, "result": f"gait failed: {exc}"}, status=400)
+        return web.json_response({"ok": True, "gait": self._gait, "result": self._last_action})
+
+    async def _apply_gait(self, mode: str) -> None:
+        cmd, parameter = _GAIT_COMMANDS[mode]
+        if self._client is not None:
+            await self._client.sport_command(cmd, parameter)
+        self._gait = mode
+        self._last_action = f"gait: {mode}"
 
 
 async def _json(request: web.Request) -> dict[str, Any]:
@@ -265,6 +300,8 @@ _INDEX_HTML = r"""<!doctype html>
     #ltFill { background:#cb83ff; }
     .mapping { margin-top:10px; display:flex; flex-wrap:wrap; gap:6px; }
     .mapping span { padding:3px 7px; border-radius:6px; background:rgba(255,255,255,.08); color:#cbd4db; font-size:11px; white-space:nowrap; }
+    .gaitpill { padding:2px 8px; border-radius:6px; background:rgba(255,255,255,.10); color:#cbd4db; font-size:11px; font-weight:800; letter-spacing:.04em; }
+    .gaitpill.active { background:#46d381; color:#06210f; box-shadow:0 0 12px rgba(70,211,129,.5); }
     .speed { min-width:145px; text-align:right; }
     .speed strong { display:block; font-size:28px; line-height:1; }
     .speed small,#lastAction { color:#aab6c0; font-size:12px; }
@@ -276,7 +313,7 @@ _INDEX_HTML = r"""<!doctype html>
     <img id="video" src="/video.mjpg" alt="Live Go2 video">
     <div class="hud">
       <div class="panel">
-        <div class="state"><span class="dot" id="dot"></span><strong id="padState">Connect controller</strong><span id="padName"></span></div>
+        <div class="state"><span class="dot" id="dot"></span><strong id="padState">Connect controller</strong><span id="padName"></span><span class="gaitpill" id="gaitState">WALK</span></div>
         <div class="meters">
           <div class="meter"><span>RT RUN</span><span class="track"><span class="fill" id="rtFill"></span></span></div>
           <div class="meter"><span>LT BACKSTAND</span><span class="track"><span class="fill" id="ltFill"></span></span></div>
@@ -284,7 +321,7 @@ _INDEX_HTML = r"""<!doctype html>
         </div>
         <div class="mapping">
           <span>RB Right Flip</span><span>LB Left Flip</span><span>Y Stand</span><span>B Sit</span>
-          <span>A Jump</span><span>X Pounce</span><span>D↑ Front Flip</span><span>D↓ Back Flip</span>
+          <span>A Jump</span><span>X Pounce</span><span>D↑ Jump Gait</span><span>D↓ Bound</span>
           <span>D←/→ Speed</span>
         </div>
       </div>
@@ -298,6 +335,7 @@ _INDEX_HTML = r"""<!doctype html>
     let current = {vx:0, vy:0, vyaw:0};
     let lastFrame = performance.now(), lastMoveSent = 0, moving = false;
     let ltHoldMs = 0, ltLatched = false, actionLockUntil = 0;
+    let gaitState = "walk";
     const edgeState = new Map();
     const dot = document.getElementById("dot");
     const padState = document.getElementById("padState");
@@ -322,6 +360,7 @@ _INDEX_HTML = r"""<!doctype html>
       speedValue.textContent = speedSteps[speedIndex].toFixed(2);
     }
     updateSpeed();
+    updateGaitHud();
     function buttonValue(pad,index){const b=pad.buttons[index];return Number(b?.value ?? (b?.pressed?1:0));}
     function down(pad,index){const b=pad.buttons[index];return Boolean(b?.pressed)||Number(b?.value||0)>.5;}
     function deadzone(value,zone=.08){if(Math.abs(value)<=zone)return 0;return Math.sign(value)*(Math.abs(value)-zone)/(1-zone);}
@@ -337,6 +376,16 @@ _INDEX_HTML = r"""<!doctype html>
     function action(name){
       const lockMs={right_flip:2200,left_flip:2200,front_flip:2200,back_flip:2200,backstand:1800,jump:1200,pounce:1400,stand_up:1200,sit_down:1200}[name]||1000;
       actionLockUntil=performance.now()+lockMs;moving=false;current={vx:0,vy:0,vyaw:0};post("/api/action",{action:name}).catch(()=>{});
+      gaitState="walk";updateGaitHud();
+    }
+    function updateGaitHud(){
+      const el=document.getElementById("gaitState");if(!el)return;
+      const label={walk:"WALK",jump:"JUMP→MOVE",bound:"BOUND"}[gaitState]||String(gaitState).toUpperCase();
+      el.textContent=label;el.className="gaitpill"+(gaitState!=="walk"?" active":"");
+    }
+    function toggleGait(which){
+      if(performance.now()<actionLockUntil)return;
+      post("/api/gait",{gait:which}).then(d=>{if(d&&typeof d.gait==="string"){gaitState=d.gait;updateGaitHud();}}).catch(()=>{});
     }
     function sendMove(body){
       const now=performance.now();
@@ -365,7 +414,7 @@ _INDEX_HTML = r"""<!doctype html>
       edge(pad,5,"rb",()=>action("right_flip"));edge(pad,4,"lb",()=>action("left_flip"));
       edge(pad,3,"y",()=>action("stand_up"));edge(pad,1,"b",()=>action("sit_down"));
       edge(pad,0,"a",()=>action("jump"));edge(pad,2,"x",()=>action("pounce"));
-      edge(pad,12,"dup",()=>action("front_flip"));edge(pad,13,"ddown",()=>action("back_flip"));
+      edge(pad,12,"dup",()=>toggleGait("jump"));edge(pad,13,"ddown",()=>toggleGait("bound"));
       edge(pad,14,"dleft",()=>updateSpeed(-1));edge(pad,15,"dright",()=>updateSpeed(1));
 
       if(now<actionLockUntil){current={vx:0,vy:0,vyaw:0};driveOutput.textContent="ACTION";requestAnimationFrame(poll);return;}
