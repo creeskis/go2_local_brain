@@ -1,5 +1,16 @@
 # go2_local_brain
 
+## Controller-Only Cockpit
+
+```bash
+./scripts/run_controller_cockpit.sh
+```
+
+Open `http://127.0.0.1:8773`. The full-screen surface contains robot video and
+the controller HUD. RT is analog run; LT is BackStand. LB/RB are left/right
+flip, ABXY are jump/sit/pounce/stand, and the D-pad maps front/back flips and
+speed down/up.
+
 A single-process Python brain for a **Unitree Go2 Air**. It turns typed natural-language commands into robot tool calls using **Ollama**, then sends motion and sport/action commands over **WebRTC** through `unitree_webrtc_connect`.
 
 This repo is tuned for Cooper's known setup:
