@@ -9,6 +9,8 @@ User=@USER@
 WorkingDirectory=@REPO@
 Environment=HOME=@HOME@
 Environment=PYTHONUNBUFFERED=1
+# Force 'normal' sport mode so continuous Move commands actually drive the robot.
+Environment=FORCE_MOTION_MODE=normal
 # SAFE DEFAULT: dry run (connect + log decisions, no motion). The installer /
 # deploy script writes GO2_PATROL_ENABLE=1 into env.local for live patrol, which
 # overrides this because the EnvironmentFiles below are loaded after it.

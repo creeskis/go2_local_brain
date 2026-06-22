@@ -9,6 +9,9 @@ User=@USER@
 WorkingDirectory=@REPO@
 Environment=HOME=@HOME@
 Environment=PYTHONUNBUFFERED=1
+# Force the robot into 'normal' sport mode so continuous Move commands actually
+# drive it (in 'mcf'/advanced mode walking velocity is ignored and it just stands).
+Environment=FORCE_MOTION_MODE=normal
 # SAFE DEFAULT: dry run (connects, streams video, logs decisions, no motion).
 # env.local (written by --live) overrides this because it loads after.
 Environment=GO2_AUTONOMY_ENABLE=0
