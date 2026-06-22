@@ -38,7 +38,7 @@ from .autonomy.perception import Observation, YoloPerceptionProvider, best_human
 from .config import load_config
 from .driver.webrtc_client import Go2Config, Go2WebRTCClient
 from .patrol_agent import _env_bool, _env_float, patrol_params_from_env
-from .viewer import _jpeg_from_frame, _lidar_payload_from_message
+from .viewer import _lidar_payload_from_message
 
 log = logging.getLogger("go2.autonomy")
 
@@ -52,6 +52,37 @@ _SCAN_STEP_S = 0.40
 
 def _fmt(value: float | None) -> str:
     return "--" if value is None else f"{value:.2f}"
+
+
+def _encode_frame_jpeg(frame: Any, max_width: int, quality: int) -> bytes | None:
+    """Downscale + JPEG-encode a WebRTC frame cheaply (libjpeg-turbo via cv2).
+
+    Runs in a worker thread. Falls back to PIL if cv2 is unavailable. Returns
+    None on any failure so the caller can simply skip the frame.
+    """
+    try:
+        import cv2  # type: ignore
+
+        img = frame.to_ndarray(format="bgr24")
+        height, width = img.shape[:2]
+        if max_width and width > max_width:
+            scale = max_width / float(width)
+            img = cv2.resize(img, (max_width, max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, int(quality)])
+        return buf.tobytes() if ok else None
+    except Exception:  # noqa: BLE001 - fall back to PIL
+        try:
+            import io
+
+            image = frame.to_image()
+            if max_width and image.width > max_width:
+                ratio = max_width / float(image.width)
+                image = image.resize((max_width, max(1, int(image.height * ratio))))
+            out = io.BytesIO()
+            image.save(out, format="JPEG", quality=int(quality))
+            return out.getvalue()
+        except Exception:  # noqa: BLE001
+            return None
 
 
 class AutonomyAgent:
@@ -102,6 +133,14 @@ class AutonomyAgent:
         self._mode = "roam"
         self._last_note = "starting"
         self._lidar_msgs = 0
+
+        # Lightweight video: cap FPS, downscale, and drop JPEG quality so the
+        # Jetson isn't re-encoding 720p every frame and the SSH tunnel isn't
+        # bandwidth-bound. All tunable via env.
+        self._video_fps = max(1.0, _env_float("GO2_VIDEO_FPS", 10.0))
+        self._video_min_interval = 1.0 / self._video_fps
+        self._video_width = int(_env_float("GO2_VIDEO_WIDTH", 640))
+        self._video_quality = int(_env_float("GO2_VIDEO_QUALITY", 55))
 
     async def run(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -204,9 +243,19 @@ class AutonomyAgent:
         video.add_track_callback(self._recv_video_track)
 
     async def _recv_video_track(self, track: Any) -> None:
+        last_encode = 0.0
         while not self._stop.is_set():
-            frame = await track.recv()
-            jpeg = _jpeg_from_frame(frame)
+            frame = await track.recv()  # always drain so aiortc doesn't backlog
+            now = time.monotonic()
+            if now - last_encode < self._video_min_interval:
+                continue  # throttle CPU + bandwidth: skip frames over the FPS cap
+            last_encode = now
+            # Encode off the event loop so it never stalls control/LiDAR.
+            jpeg = await asyncio.to_thread(
+                _encode_frame_jpeg, frame, self._video_width, self._video_quality
+            )
+            if jpeg is None:
+                continue
             async with self._changed:
                 self._latest_jpeg = jpeg
                 self._latest_video_ts = time.time()
