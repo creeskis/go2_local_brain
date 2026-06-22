@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import io
+import json
 import logging
 import math
 import time
@@ -55,6 +56,7 @@ class ControllerCockpit:
         app.router.add_get("/", self._index)
         app.router.add_get("/video.mjpg", self._video_stream)
         app.router.add_get("/status.json", self._status_json)
+        app.router.add_get("/ws/control", self._control_socket)
         app.router.add_post("/api/move", self._move)
         app.router.add_post("/api/stop", self._stop)
         app.router.add_post("/api/action", self._action)
@@ -168,13 +170,40 @@ class ControllerCockpit:
         vx = float(payload.get("vx", 0.0))
         vy = float(payload.get("vy", 0.0))
         vyaw = float(payload.get("vyaw", 0.0))
-        duration = float(payload.get("duration_s", 0.12))
         if time.monotonic() < self._action_lock_until:
             return web.json_response({"ok": True, "result": f"action in progress: {self._last_action}"})
         if self._client is not None:
-            await self._client.move(vx, vy, vyaw, duration)
+            vx, vy, vyaw = self._client.publish_velocity(vx, vy, vyaw)
         self._last_action = f"drive vx={vx:.2f} vy={vy:.2f} yaw={vyaw:.2f}"
         return web.json_response({"ok": True, "result": self._last_action})
+
+    async def _control_socket(self, request: web.Request) -> web.WebSocketResponse:
+        socket = web.WebSocketResponse(heartbeat=10.0)
+        await socket.prepare(request)
+        try:
+            async for message in socket:
+                if message.type != web.WSMsgType.TEXT:
+                    continue
+                try:
+                    payload = json.loads(message.data)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                kind = payload.get("type")
+                if kind == "move" and time.monotonic() >= self._action_lock_until:
+                    vx = float(payload.get("vx", 0.0))
+                    vy = float(payload.get("vy", 0.0))
+                    vyaw = float(payload.get("vyaw", 0.0))
+                    if self._client is not None:
+                        vx, vy, vyaw = self._client.publish_velocity(vx, vy, vyaw)
+                    self._last_action = f"drive vx={vx:.2f} vy={vy:.2f} yaw={vyaw:.2f}"
+                elif kind == "stop":
+                    if self._client is not None:
+                        await self._client.stop()
+                    self._last_action = "stop"
+        finally:
+            if self._client is not None:
+                await self._client.stop()
+        return socket
 
     async def _stop(self, _request: web.Request) -> web.Response:
         if self._client is not None:
@@ -264,10 +293,10 @@ _INDEX_HTML = r"""<!doctype html>
   </main>
   <script>
     const speedSteps = [0.60, 1.00, 1.40, 1.80, 2.00];
-    let speedIndex = Math.max(0, Math.min(speedSteps.length - 1, Number(localStorage.getItem("go2ControllerSpeed") ?? 2)));
+    let speedIndex = Math.max(0, Math.min(speedSteps.length - 1, Number(localStorage.getItem("go2ControllerSpeed") ?? 4)));
     let filteredRT = 0, filteredLT = 0;
     let current = {vx:0, vy:0, vyaw:0};
-    let lastFrame = performance.now(), lastMoveSent = 0, moving = false, moveBusy = false, movePending = false;
+    let lastFrame = performance.now(), lastMoveSent = 0, moving = false;
     let ltHoldMs = 0, ltLatched = false, actionLockUntil = 0;
     const edgeState = new Map();
     const dot = document.getElementById("dot");
@@ -278,6 +307,14 @@ _INDEX_HTML = r"""<!doctype html>
     const driveOutput = document.getElementById("driveOutput");
     const speedValue = document.getElementById("speedValue");
     const lastAction = document.getElementById("lastAction");
+    let controlSocket = null;
+
+    function connectControl() {
+      const scheme = location.protocol === "https:" ? "wss" : "ws";
+      controlSocket = new WebSocket(`${scheme}://${location.host}/ws/control`);
+      controlSocket.addEventListener("close", () => setTimeout(connectControl, 250));
+    }
+    connectControl();
 
     function updateSpeed(delta=0) {
       speedIndex = Math.max(0, Math.min(speedSteps.length - 1, speedIndex + delta));
@@ -287,7 +324,7 @@ _INDEX_HTML = r"""<!doctype html>
     updateSpeed();
     function buttonValue(pad,index){const b=pad.buttons[index];return Number(b?.value ?? (b?.pressed?1:0));}
     function down(pad,index){const b=pad.buttons[index];return Boolean(b?.pressed)||Number(b?.value||0)>.5;}
-    function deadzone(value,zone=.14){if(Math.abs(value)<=zone)return 0;return Math.sign(value)*(Math.abs(value)-zone)/(1-zone);}
+    function deadzone(value,zone=.08){if(Math.abs(value)<=zone)return 0;return Math.sign(value)*(Math.abs(value)-zone)/(1-zone);}
     function smoothstep(value){value=Math.max(0,Math.min(1,value));return value*value*(3-2*value);}
     function smooth(currentValue,target,dt,tau){return currentValue+(target-currentValue)*(1-Math.exp(-dt/tau));}
     async function post(path,body={}) {
@@ -299,30 +336,31 @@ _INDEX_HTML = r"""<!doctype html>
     function edge(pad,index,key,callback){const value=down(pad,index);const prior=edgeState.get(key)||false;if(value&&!prior)callback();edgeState.set(key,value);}
     function action(name){
       const lockMs={right_flip:2200,left_flip:2200,front_flip:2200,back_flip:2200,backstand:1800,jump:1200,pounce:1400,stand_up:1200,sit_down:1200}[name]||1000;
-      actionLockUntil=performance.now()+lockMs;moving=false;movePending=false;current={vx:0,vy:0,vyaw:0};post("/api/action",{action:name}).catch(()=>{});
+      actionLockUntil=performance.now()+lockMs;moving=false;current={vx:0,vy:0,vyaw:0};post("/api/action",{action:name}).catch(()=>{});
     }
-    function sendMove(body,force=false){
+    function sendMove(body){
       const now=performance.now();
-      if(!force&&now-lastMoveSent<50){movePending=true;return;}
-      if(moveBusy){movePending=true;return;}
-      moveBusy=true;movePending=false;lastMoveSent=now;
-      post("/api/move",body).catch(()=>{}).finally(()=>{moveBusy=false;if(movePending)sendMove(body,true);});
+      if(now-lastMoveSent<20)return;
+      lastMoveSent=now;
+      const payload=JSON.stringify({type:"move",...body});
+      if(controlSocket?.readyState===WebSocket.OPEN)controlSocket.send(payload);
+      else fetch("/api/move",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).catch(()=>{});
     }
-    function stop(){if(moving){moving=false;post("/api/stop").catch(()=>{});}current={vx:0,vy:0,vyaw:0};}
+    function stop(){if(moving){moving=false;if(controlSocket?.readyState===WebSocket.OPEN)controlSocket.send('{"type":"stop"}');else post("/api/stop").catch(()=>{});}current={vx:0,vy:0,vyaw:0};}
     function poll(now){
       const dt=Math.min(.08,Math.max(.001,(now-lastFrame)/1000));lastFrame=now;
       const pad=Array.from(navigator.getGamepads?.()||[]).find(Boolean);
-      if(!pad){dot.className="dot";padState.textContent="Connect controller";padName.textContent="";filteredRT=smooth(filteredRT,0,dt,.16);filteredLT=smooth(filteredLT,0,dt,.16);stop();requestAnimationFrame(poll);return;}
+      if(!pad){dot.className="dot";padState.textContent="Connect controller";padName.textContent="";filteredRT=smooth(filteredRT,0,dt,.04);filteredLT=smooth(filteredLT,0,dt,.05);stop();requestAnimationFrame(poll);return;}
       dot.className="dot ready";padState.textContent="Controller active";padName.textContent=pad.id;
 
-      filteredRT=smooth(filteredRT,buttonValue(pad,7),dt,.16);
-      filteredLT=smooth(filteredLT,buttonValue(pad,6),dt,.18);
+      filteredRT=smooth(filteredRT,buttonValue(pad,7),dt,.04);
+      filteredLT=smooth(filteredLT,buttonValue(pad,6),dt,.05);
       const run=smoothstep(Math.max(0,(filteredRT-.025)/.975));
-      rtFill.style.width=`${run*100}%`;ltFill.style.width=`${Math.min(1,ltHoldMs/350)*100}%`;
+      rtFill.style.width=`${run*100}%`;ltFill.style.width=`${Math.min(1,ltHoldMs/160)*100}%`;
 
-      if(filteredLT>.78&&!ltLatched){ltHoldMs+=dt*1000;if(ltHoldMs>=350){ltLatched=true;action("backstand");}}
-      else if(filteredLT<.42&&!ltLatched){ltHoldMs=0;}
-      if(filteredLT<.16){ltLatched=false;ltHoldMs=0;}
+      if(filteredLT>.62&&!ltLatched){ltHoldMs+=dt*1000;if(ltHoldMs>=160){ltLatched=true;action("backstand");}}
+      else if(filteredLT<.32&&!ltLatched){ltHoldMs=0;}
+      if(filteredLT<.12){ltLatched=false;ltHoldMs=0;}
 
       edge(pad,5,"rb",()=>action("right_flip"));edge(pad,4,"lb",()=>action("left_flip"));
       edge(pad,3,"y",()=>action("stand_up"));edge(pad,1,"b",()=>action("sit_down"));
@@ -333,9 +371,9 @@ _INDEX_HTML = r"""<!doctype html>
       if(now<actionLockUntil){current={vx:0,vy:0,vyaw:0};driveOutput.textContent="ACTION";requestAnimationFrame(poll);return;}
       const speed=speedSteps[speedIndex];
       const target={vx:-deadzone(pad.axes[1]||0)*speed+run*speed,vy:-deadzone(pad.axes[0]||0)*Math.min(speed,.95),vyaw:-deadzone(pad.axes[2]||0)*2.35};
-      current.vx=smooth(current.vx,target.vx,dt,.10);current.vy=smooth(current.vy,target.vy,dt,.10);current.vyaw=smooth(current.vyaw,target.vyaw,dt,.09);
+      current.vx=smooth(current.vx,target.vx,dt,.025);current.vy=smooth(current.vy,target.vy,dt,.025);current.vyaw=smooth(current.vyaw,target.vyaw,dt,.022);
       driveOutput.textContent=`${current.vx.toFixed(2)} / ${current.vyaw.toFixed(2)}`;
-      if(Math.abs(current.vx)>.015||Math.abs(current.vy)>.015||Math.abs(current.vyaw)>.015){moving=true;sendMove({...current,duration_s:.12});}else stop();
+      if(Math.abs(current.vx)>.01||Math.abs(current.vy)>.01||Math.abs(current.vyaw)>.01){moving=true;sendMove(current);}else stop();
       requestAnimationFrame(poll);
     }
     window.addEventListener("gamepaddisconnected",stop);

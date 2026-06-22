@@ -473,6 +473,20 @@ class Go2WebRTCClient:
         except asyncio.CancelledError:
             pass
 
+    def publish_velocity(self, vx: float, vy: float = 0.0, vyaw: float = 0.0) -> tuple[float, float, float]:
+        """Publish one low-latency operator velocity sample immediately.
+
+        Controller surfaces call this repeatedly while an input is held. It
+        avoids constructing/cancelling a timed move task for every sample;
+        the existing deadman still publishes zero if samples stop arriving.
+        """
+        cvx = clamp(vx, -MAX_VX, MAX_VX)
+        cvy = clamp(vy, -MAX_VY, MAX_VY)
+        cvyaw = clamp(vyaw, -MAX_VYAW, MAX_VYAW)
+        self._publish_move(cvx, cvy, cvyaw)
+        self._touch()
+        return cvx, cvy, cvyaw
+
     async def explore_room(self, duration_s: float = 3.0, mode: Optional[str] = None) -> None:
         """Explore with short forward/turn steps."""
         if not self._cfg.enable_exploration:

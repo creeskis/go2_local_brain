@@ -58,9 +58,13 @@ class ControllerHtmlTests(unittest.TestCase):
             self.assertIn(mapping, _INDEX_HTML)
 
     def test_triggers_use_filtered_analog_values(self) -> None:
-        self.assertIn("filteredRT=smooth(filteredRT,buttonValue(pad,7),dt,.16)", _INDEX_HTML)
-        self.assertIn("filteredLT=smooth(filteredLT,buttonValue(pad,6),dt,.18)", _INDEX_HTML)
+        self.assertIn("filteredRT=smooth(filteredRT,buttonValue(pad,7),dt,.04)", _INDEX_HTML)
+        self.assertIn("filteredLT=smooth(filteredLT,buttonValue(pad,6),dt,.05)", _INDEX_HTML)
         self.assertIn("smoothstep", _INDEX_HTML)
+
+    def test_controller_uses_persistent_low_latency_socket(self) -> None:
+        self.assertIn("/ws/control", _INDEX_HTML)
+        self.assertIn("new WebSocket", _INDEX_HTML)
 
 
 if __name__ == "__main__":
