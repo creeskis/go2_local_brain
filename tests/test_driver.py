@@ -85,6 +85,14 @@ class PublishMoveTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             client._publish_move(0.0, 0.0, 0.0)
 
+    def test_immediate_velocity_publishes_without_timed_task(self) -> None:
+        pubsub = _FakePubSub(ready=True)
+        client = _make_client_with_fake(pubsub)
+        values = client.publish_velocity(0.7, -0.2, 0.4)
+        self.assertEqual(values, (0.7, -0.2, 0.4))
+        self.assertIsNone(client._move_task)
+        self.assertEqual(len(pubsub.published), 1)
+
 
 class SportStateTests(unittest.TestCase):
     def test_callback_caches_and_summarizes(self) -> None:
